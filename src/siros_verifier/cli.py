@@ -10,14 +10,15 @@ from pathlib import Path
 import cbor2
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from siros_verifier import ble, crypto, display, engagement, mdoc
+from siros_verifier import ble, crypto, display, engagement, mdoc, qr
 from siros_verifier.engagement import DeviceEngagement, UnsupportedEngagementError
 
 TRUST_BANNER = (
-    "This tool decodes and displays IssuerAuth/DeviceAuth signatures and certificate\n"
-    "chains but does NOT verify them and does NOT evaluate trust. Every credential\n"
-    "and claim shown is UNVERIFIED input from the peer - do not make trust decisions\n"
-    "based on this output."
+    "This tool cryptographically verifies IssuerAuth/DeviceAuth signatures, MACs, and\n"
+    "digests against the key/certificate presented in the message itself. It does NOT\n"
+    "evaluate trust: certificate chains are never validated against an IACA root, and\n"
+    "revocation is never checked. A VALID result means \"internally consistent\", not\n"
+    "\"trustworthy\" - do not make trust decisions based on this output."
 )
 
 DEFAULT_REQUESTS = ["org.iso.18013.5.1.mDL:org.iso.18013.5.1:given_name,family_name"]
@@ -47,11 +48,17 @@ def parse_requests(specs: list[str]) -> list[mdoc.DocRequest]:
 
 
 def _resolve_engagement_uri(args: argparse.Namespace) -> str:
+    if getattr(args, "qr_camera", False):
+        return qr.scan_camera(
+            timeout=args.qr_camera_timeout,
+            camera_index=args.camera_index,
+            log=lambda msg: print(msg, file=sys.stderr),
+        )
     if args.qr_image:
         return engagement.read_qr_image(args.qr_image)
     if args.mdoc_uri:
         return args.mdoc_uri
-    raise SystemExit("error: provide either a `mdoc:...` URI or --qr-image")
+    raise SystemExit("error: provide a `mdoc:...` URI, --qr-image, or --qr-camera")
 
 
 def _resolve_handover(args: argparse.Namespace) -> list | None:
@@ -157,12 +164,20 @@ async def run_read(args: argparse.Namespace) -> int:
     plaintext = crypto.decrypt_device_message(sk_device, 1, session_data["data"])
     _dump_cbor(args.dump_cbor, "device_response.cbor", plaintext)
     response = mdoc.parse_device_response(plaintext)
+    for doc in response.documents:
+        doc.device_auth_valid = mdoc.verify_device_auth(doc, session_transcript, e_reader_priv)
 
     if args.json:
         print(display.to_json(response))
     else:
         print_device_response(response)
     return 0 if response.status == 0 else 1
+
+
+def _verdict(value: bool | None, true_word: str = "VALID", false_word: str = "INVALID") -> str:
+    if value is None:
+        return "NOT VERIFIED (unsupported algorithm or missing key/cert)"
+    return true_word if value else false_word
 
 
 def print_device_response(response: mdoc.DeviceResponseResult) -> None:
@@ -179,7 +194,8 @@ def print_device_response(response: mdoc.DeviceResponseResult) -> None:
         for ns, elements in doc.namespaces.items():
             print(f"  namespace {ns}:")
             for element in elements:
-                print(f"    {element.identifier} = {display.format_value(element.value)}")
+                digest_note = f" [digest {_verdict(element.digest_valid, 'OK', 'MISMATCH')}]" if element.digest_id is not None else ""
+                print(f"    {element.identifier} = {display.format_value(element.value)}{digest_note}")
 
         if doc.device_namespaces:
             print("  deviceSigned nameSpaces:")
@@ -195,11 +211,11 @@ def print_device_response(response: mdoc.DeviceResponseResult) -> None:
 
         if doc.issuer_auth:
             ia = doc.issuer_auth
-            print(f"  issuerAuth: alg={ia.alg_name} [UNVERIFIED SIGNATURE]")
+            print(f"  issuerAuth: alg={ia.alg_name} signature={_verdict(ia.signature_valid)}")
             for cert in ia.certificates:
                 print(f"    certificate: subject={cert.subject}")
                 print(f"                 issuer={cert.issuer} serial={cert.serial_number:x}")
-                print(f"                 validity={cert.not_before} .. {cert.not_after}")
+                print(f"                 validity={cert.not_before} .. {cert.not_after} [chain/trust NOT evaluated]")
             if ia.mso:
                 mso = ia.mso
                 print(f"  MSO: version={mso.version} digestAlgorithm={mso.digest_algorithm} docType={mso.doc_type}")
@@ -209,7 +225,37 @@ def print_device_response(response: mdoc.DeviceResponseResult) -> None:
                 print(f"       signed={signed} validFrom={valid_from} validUntil={valid_until}")
 
         if doc.device_auth_type:
-            print(f"  deviceAuth: {doc.device_auth_type} [UNVERIFIED]")
+            print(f"  deviceAuth: {doc.device_auth_type} {_verdict(doc.device_auth_valid)}")
+
+
+def cmd_qr_scan(args: argparse.Namespace) -> int:
+    try:
+        text = qr.scan_camera(
+            timeout=args.timeout,
+            camera_index=args.camera_index,
+            log=lambda msg: print(msg, file=sys.stderr),
+        )
+    except (ImportError, RuntimeError, qr.QrNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(text)
+    return 0
+
+
+def cmd_qr_show(args: argparse.Namespace) -> int:
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8").strip()
+    elif args.text:
+        text = args.text
+    else:
+        text = sys.stdin.read().strip()
+    try:
+        path = qr.show_in_browser(text, title=args.title)
+    except ImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Opened {path} in a browser tab", file=sys.stderr)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -217,8 +263,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="siros-verify",
         description=(
             "Commandline ISO/IEC 18013-5 BLE proximity verifier for debugging mdoc "
-            "device retrieval. Trust evaluation is out of scope: signatures and "
-            "certificate chains are decoded, never verified."
+            "device retrieval. Signatures/MACs/digests are verified against the "
+            "presented key; trust evaluation (chain/IACA/revocation) is out of scope."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -226,6 +272,18 @@ def build_parser() -> argparse.ArgumentParser:
     def add_engagement_source_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("mdoc_uri", nargs="?", help="The 'mdoc:...' URI encoded in the engagement QR code")
         p.add_argument("--qr-image", help="Read the mdoc: URI from a QR code image file (requires the 'qr' extra)")
+        p.add_argument(
+            "--qr-camera",
+            action="store_true",
+            help="Scan the mdoc: URI with a webcam instead (requires the 'camera' extra)",
+        )
+        p.add_argument(
+            "--camera-index",
+            type=int,
+            default=None,
+            help="Pin --qr-camera to one camera device index (default: try every detected camera)",
+        )
+        p.add_argument("--qr-camera-timeout", type=float, default=30.0, help="Seconds to wait for --qr-camera")
 
     read_parser = subparsers.add_parser("read", help="Perform a full BLE device retrieval and display the result")
     add_engagement_source_args(read_parser)
@@ -249,6 +307,22 @@ def build_parser() -> argparse.ArgumentParser:
     decode_parser = engagement_subparsers.add_parser("decode", help="Decode and print a DeviceEngagement")
     add_engagement_source_args(decode_parser)
     decode_parser.set_defaults(handler=cmd_engagement_decode)
+
+    qr_parser = subparsers.add_parser("qr", help="Webcam QR capture / browser QR display convenience helpers")
+    qr_subparsers = qr_parser.add_subparsers(dest="qr_command", required=True)
+
+    scan_parser = qr_subparsers.add_parser("scan", help="Scan a QR code with a webcam and print the decoded text")
+    scan_parser.add_argument(
+        "--camera-index", type=int, default=None, help="Pin to one camera device index (default: try all)"
+    )
+    scan_parser.add_argument("--timeout", type=float, default=30.0)
+    scan_parser.set_defaults(handler=cmd_qr_scan)
+
+    show_parser = qr_subparsers.add_parser("show", help="Display text as a QR code in a browser tab")
+    show_parser.add_argument("text", nargs="?", help="Text to encode (reads stdin if omitted)")
+    show_parser.add_argument("--file", help="Read the text to encode from a file instead of the positional arg")
+    show_parser.add_argument("--title", default="siros-verify")
+    show_parser.set_defaults(handler=cmd_qr_show)
 
     return parser
 

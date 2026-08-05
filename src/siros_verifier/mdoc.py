@@ -2,12 +2,14 @@
 
 Builds multi-document, multi-namespace DeviceRequests, and decodes
 DeviceResponse down to IssuerAuth (COSE_Sign1) and the embedded
-MobileSecurityObject (MSO).
+MobileSecurityObject (MSO). Per-element digests and IssuerAuth's signature
+are verified against the certificate presented in the message itself (see
+verify.py); DeviceAuth verification additionally needs session context and
+runs separately via verify_device_auth().
 
-IssuerAuth signatures, certificate chains, and DeviceAuth are DECODED ONLY,
-never cryptographically verified and never checked against a trust anchor -
-trust evaluation is out of scope for this tool. Every field here is
-UNVERIFIED input from the peer.
+None of this is trust evaluation: certificate chains are never validated
+against an IACA root and revocation is never checked - a "valid" signature
+here means "internally consistent with the presented key", not "trustworthy".
 """
 
 from __future__ import annotations
@@ -17,6 +19,9 @@ from datetime import datetime
 
 import cbor2
 from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import ec
+
+from siros_verifier import crypto, verify
 
 # ISO 18013-5 Table 15.
 STATUS_NAMES = {
@@ -116,6 +121,7 @@ class IssuerAuthInfo:
     alg_name: str
     certificates: list[CertificateInfo] = field(default_factory=list)
     mso: MobileSecurityObject | None = None
+    signature_valid: bool | None = None  # None = not attempted (no cert / unsupported alg)
 
     @classmethod
     def from_cose_sign1(cls, cose_sign1: list) -> IssuerAuthInfo:
@@ -134,10 +140,20 @@ class IssuerAuthInfo:
             der_certs = list(x5chain)
         certificates = [CertificateInfo.from_der(der) for der in der_certs]
 
+        signature_valid = None
+        if der_certs:
+            try:
+                leaf_public_key = x509.load_der_x509_certificate(der_certs[0]).public_key()
+                signature_valid = verify.verify_cose_sign1(cose_sign1, leaf_public_key)
+            except verify.UnsupportedAlgorithm:
+                signature_valid = None
+
         mso_cbor = _unwrap_tagged24(cbor2.loads(payload)) if payload else None
         mso = MobileSecurityObject.from_cbor(mso_cbor) if isinstance(mso_cbor, dict) else None
 
-        return cls(alg=alg, alg_name=alg_name, certificates=certificates, mso=mso)
+        return cls(
+            alg=alg, alg_name=alg_name, certificates=certificates, mso=mso, signature_valid=signature_valid
+        )
 
 
 @dataclass
@@ -145,6 +161,7 @@ class ParsedElement:
     identifier: str
     value: object
     digest_id: int | None
+    digest_valid: bool | None = None  # None = not attempted (no MSO / no matching digest)
 
 
 @dataclass
@@ -155,6 +172,9 @@ class ParsedDocument:
     device_namespaces: dict[str, dict]
     device_auth_type: str | None  # "deviceSignature" | "deviceMac" | None
     errors: dict
+    device_auth_cbor: dict = field(default_factory=dict)
+    device_namespaces_raw: bytes | None = None
+    device_auth_valid: bool | None = None  # set by verify_device_auth(), which needs session context
 
 
 @dataclass
@@ -166,17 +186,32 @@ class DeviceResponseResult:
     document_errors: list[dict]
 
 
-def _parse_issuer_signed_namespaces(name_spaces_cbor: dict) -> dict[str, list[ParsedElement]]:
+def _parse_issuer_signed_namespaces(
+    name_spaces_cbor: dict, mso: MobileSecurityObject | None
+) -> dict[str, list[ParsedElement]]:
     namespaces: dict[str, list[ParsedElement]] = {}
     for ns, tagged_items in name_spaces_cbor.items():
         elements = []
         for tagged_item in tagged_items:
             item = _unwrap_tagged24(tagged_item)
+            digest_id = item.get("digestID")
+
+            digest_valid = None
+            expected_digest = (mso.value_digests.get(ns, {}) if mso else {}).get(digest_id)
+            if mso is not None and mso.digest_algorithm is not None and expected_digest is not None:
+                try:
+                    digest_valid = verify.verify_digest(
+                        mso.digest_algorithm, cbor2.dumps(tagged_item), expected_digest
+                    )
+                except verify.UnsupportedAlgorithm:
+                    digest_valid = None
+
             elements.append(
                 ParsedElement(
                     identifier=item["elementIdentifier"],
                     value=item["elementValue"],
-                    digest_id=item.get("digestID"),
+                    digest_id=digest_id,
+                    digest_valid=digest_valid,
                 )
             )
         namespaces[ns] = elements
@@ -185,13 +220,16 @@ def _parse_issuer_signed_namespaces(name_spaces_cbor: dict) -> dict[str, list[Pa
 
 def _parse_document(doc: dict) -> ParsedDocument:
     issuer_signed = doc.get("issuerSigned", {})
-    namespaces = _parse_issuer_signed_namespaces(issuer_signed.get("nameSpaces", {}))
-
     issuer_auth_cbor = issuer_signed.get("issuerAuth")
     issuer_auth = IssuerAuthInfo.from_cose_sign1(issuer_auth_cbor) if issuer_auth_cbor else None
+    namespaces = _parse_issuer_signed_namespaces(
+        issuer_signed.get("nameSpaces", {}), issuer_auth.mso if issuer_auth else None
+    )
 
     device_signed = doc.get("deviceSigned") or {}
-    device_namespaces = _unwrap_tagged24(device_signed.get("nameSpaces")) or {} if device_signed else {}
+    device_namespaces_tag = device_signed.get("nameSpaces")
+    device_namespaces = (_unwrap_tagged24(device_namespaces_tag) or {}) if device_namespaces_tag else {}
+    device_namespaces_raw = cbor2.dumps(device_namespaces_tag) if device_namespaces_tag is not None else None
     device_auth = device_signed.get("deviceAuth") or {}
     device_auth_type = next(iter(device_auth), None)
 
@@ -202,7 +240,50 @@ def _parse_document(doc: dict) -> ParsedDocument:
         device_namespaces=device_namespaces,
         device_auth_type=device_auth_type,
         errors=doc.get("errors", {}),
+        device_auth_cbor=device_auth,
+        device_namespaces_raw=device_namespaces_raw,
     )
+
+
+def verify_device_auth(
+    doc: ParsedDocument, session_transcript: bytes, e_reader_priv: ec.EllipticCurvePrivateKey
+) -> bool | None:
+    """Verify DeviceAuth (deviceSignature or deviceMac) against the deviceKey
+    bound in the MSO - ISO 18013-5 §9.1.3. Requires the reader's own ephemeral
+    private key and the SessionTranscript, so this runs as a separate pass
+    over an already-parsed ParsedDocument rather than inside parse_device_response."""
+    mso = doc.issuer_auth.mso if doc.issuer_auth else None
+    if not doc.device_auth_type or mso is None or mso.device_key is None or doc.device_namespaces_raw is None:
+        return None
+    try:
+        device_pub = crypto.cose_key_to_public_key(mso.device_key)
+    except ValueError:
+        return None
+
+    device_authentication = [
+        "DeviceAuthentication",
+        cbor2.loads(session_transcript),
+        doc.doc_type,
+        doc.device_namespaces_raw,
+    ]
+    detached_payload = cbor2.dumps(cbor2.CBORTag(24, cbor2.dumps(device_authentication)))
+
+    try:
+        if doc.device_auth_type == "deviceSignature":
+            return verify.verify_cose_sign1(
+                doc.device_auth_cbor["deviceSignature"], device_pub, detached_payload=detached_payload
+            )
+        if doc.device_auth_type == "deviceMac":
+            if not isinstance(device_pub, ec.EllipticCurvePublicKey):
+                return None
+            zab = e_reader_priv.exchange(ec.ECDH(), device_pub)
+            emac_key = crypto.derive_emac_key(zab, session_transcript)
+            return verify.verify_cose_mac0(
+                doc.device_auth_cbor["deviceMac"], emac_key, detached_payload=detached_payload
+            )
+    except verify.UnsupportedAlgorithm:
+        return None
+    return None
 
 
 def parse_device_response(plaintext: bytes) -> DeviceResponseResult:

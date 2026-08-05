@@ -1,10 +1,9 @@
 import datetime
 
 import cbor2
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
+from helpers import cose_key_from_public_key, make_self_signed_cert_der, sign_es256_raw, tagged24
 
 from siros_verifier.mdoc import (
     DocRequest,
@@ -13,54 +12,40 @@ from siros_verifier.mdoc import (
     parse_device_response,
 )
 
-
-def make_self_signed_cert_der() -> bytes:
-    key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test Document Signer")])
-    now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(12345)
-        .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=365))
-        .sign(key, hashes.SHA256())
-    )
-    return cert.public_bytes(serialization.Encoding.DER)
+GIVEN_NAME_ITEM = {"digestID": 1, "random": b"\x01" * 16, "elementIdentifier": "given_name", "elementValue": "Alice"}
 
 
-def tagged24(obj) -> cbor2.CBORTag:
-    return cbor2.CBORTag(24, cbor2.dumps(obj))
-
-
-def build_device_response_bytes(*, with_device_signature: bool = True) -> bytes:
+def build_device_response_bytes(
+    *, with_device_signature: bool = True, tamper_signature: bool = False, tamper_digest: bool = False
+) -> bytes:
     now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
-    issuer_signed_item = tagged24(
-        {
-            "digestID": 1,
-            "random": b"\x01" * 16,
-            "elementIdentifier": "given_name",
-            "elementValue": "Alice",
-        }
-    )
+    issuer_signed_item = tagged24(GIVEN_NAME_ITEM)
+    correct_digest = hashes.Hash(hashes.SHA256())
+    correct_digest.update(cbor2.dumps(issuer_signed_item))
+    digest = correct_digest.finalize() if not tamper_digest else b"\x00" * 32
+
+    device_key_priv = ec.generate_private_key(ec.SECP256R1())
 
     mso = {
         "version": "1.0",
         "digestAlgorithm": "SHA-256",
-        "valueDigests": {"org.iso.18013.5.1": {1: b"\x02" * 32}},
-        "deviceKeyInfo": {"deviceKey": {1: 2, -1: 1, -2: b"\x03" * 32, -3: b"\x04" * 32}},
+        "valueDigests": {"org.iso.18013.5.1": {1: digest}},
+        "deviceKeyInfo": {"deviceKey": cose_key_from_public_key(device_key_priv.public_key())},
         "docType": "org.iso.18013.5.1.mDL",
         "validityInfo": {"signed": now, "validFrom": now, "validUntil": now + datetime.timedelta(days=30)},
     }
-    mso_bytes = tagged24(mso)
+    mso_payload = cbor2.dumps(tagged24(mso))
 
+    ds_priv = ec.generate_private_key(ec.SECP256R1())
+    cert_der = make_self_signed_cert_der(ds_priv)
     protected = cbor2.dumps({1: -7})  # ES256
-    cert_der = make_self_signed_cert_der()
-    issuer_auth = [protected, {33: cert_der}, cbor2.dumps(mso_bytes), b"\x00" * 64]
+    sig_structure = cbor2.dumps(["Signature1", protected, b"", mso_payload])
+    signature = sign_es256_raw(ds_priv, sig_structure) if not tamper_signature else b"\x00" * 64
+    issuer_auth = [protected, {33: cert_der}, mso_payload, signature]
 
+    # DeviceAuth verification needs session context (see test_cli_read.py); here just
+    # exercise the decode path with a syntactically-present but unverified deviceAuth.
     device_auth = {"deviceSignature": [b"", {}, None, b"\x00" * 64]} if with_device_signature else {}
 
     document = {
@@ -105,11 +90,13 @@ def test_parse_device_response_full_document():
     assert doc.doc_type == "org.iso.18013.5.1.mDL"
     assert doc.namespaces["org.iso.18013.5.1"][0].identifier == "given_name"
     assert doc.namespaces["org.iso.18013.5.1"][0].value == "Alice"
+    assert doc.namespaces["org.iso.18013.5.1"][0].digest_valid is True
     assert doc.device_auth_type == "deviceSignature"
     assert doc.device_namespaces == {}
 
     assert doc.issuer_auth is not None
     assert doc.issuer_auth.alg_name == "ES256"
+    assert doc.issuer_auth.signature_valid is True
     assert len(doc.issuer_auth.certificates) == 1
     assert doc.issuer_auth.certificates[0].subject == "CN=Test Document Signer"
 
@@ -117,6 +104,18 @@ def test_parse_device_response_full_document():
     assert doc.issuer_auth.mso.digest_algorithm == "SHA-256"
     assert doc.issuer_auth.mso.doc_type == "org.iso.18013.5.1.mDL"
     assert doc.issuer_auth.mso.validity_info["signed"] == datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def test_parse_device_response_detects_invalid_signature():
+    result = parse_device_response(build_device_response_bytes(tamper_signature=True))
+    assert result.documents[0].issuer_auth.signature_valid is False
+
+
+def test_parse_device_response_detects_digest_mismatch():
+    result = parse_device_response(build_device_response_bytes(tamper_digest=True))
+    assert result.documents[0].namespaces["org.iso.18013.5.1"][0].digest_valid is False
+    # tampering the digest doesn't touch the MSO signature itself
+    assert result.documents[0].issuer_auth.signature_valid is True
 
 
 def test_parse_device_response_without_device_auth():

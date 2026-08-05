@@ -59,17 +59,27 @@ def build_session_transcript(
     return cbor2.dumps(transcript)
 
 
-def derive_session_keys(zab: bytes, session_transcript: bytes) -> tuple[bytes, bytes]:
-    """ECKA-DH -> HKDF-SHA256(SKReader/SKDevice), salt = SHA-256(tag-24-wrapped
-    SessionTranscriptBytes) - ISO 18013-5 §9.1.1.5."""
+def _transcript_salt(session_transcript: bytes) -> bytes:
+    """salt = SHA-256(tag-24-wrapped SessionTranscriptBytes), shared by SKReader/
+    SKDevice (§9.1.1.5) and EMacKey (§9.1.3.5) derivation."""
     session_transcript_bytes = cbor2.dumps(cbor2.CBORTag(24, session_transcript))
     digest = hashes.Hash(hashes.SHA256())
     digest.update(session_transcript_bytes)
-    salt = digest.finalize()
+    return digest.finalize()
 
+
+def derive_session_keys(zab: bytes, session_transcript: bytes) -> tuple[bytes, bytes]:
+    """ECKA-DH -> HKDF-SHA256(SKReader/SKDevice) - ISO 18013-5 §9.1.1.5."""
+    salt = _transcript_salt(session_transcript)
     sk_reader = HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=b"SKReader").derive(zab)
     sk_device = HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=b"SKDevice").derive(zab)
     return sk_reader, sk_device
+
+
+def derive_emac_key(zab: bytes, session_transcript: bytes) -> bytes:
+    """ECKA-DH(SDeviceKey/EReaderKey) -> HKDF-SHA256(EMacKey) - ISO 18013-5 §9.1.3.5."""
+    salt = _transcript_salt(session_transcript)
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=b"EMacKey").derive(zab)
 
 
 def gcm_iv(identifier: bytes, counter: int) -> bytes:
