@@ -37,6 +37,7 @@ def test_parse_peripheral_server_mode():
     assert de.central_client_uuid is None
     assert de.supports_peripheral_server_mode
     assert de.e_device_key_pub.public_numbers() == pub.public_numbers()
+    assert de.e_device_key_bytes == cbor2.dumps(cose_key_tag(pub))
 
 
 def test_parse_central_client_mode_only():

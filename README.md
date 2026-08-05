@@ -40,23 +40,47 @@ Return SessionData       ─────────────▶  Decrypt & v
 1. **Engagement** - decode the `mdoc:` URI (or NFC static handover payload) into a `DeviceEngagement`
 2. **Key agreement** - generate an ephemeral P-256 key pair, ECDH with the mdoc's `EDeviceKey`
 3. **Session keys** - derive `SKReader`/`SKDevice` via HKDF-SHA256 over the `SessionTranscript`
-4. **BLE transport** - scan for the peripheral-server-mode service UUID, connect as GATT central
+4. **BLE transport** - either scan for the peripheral-server-mode UUID and connect as GATT central, or advertise the central-client-mode UUID as a GATT peripheral and wait for the mdoc to connect - whichever the engagement offers
 5. **Request** - encrypt a `DeviceRequest` (AES-256-GCM) for one or more docType/namespace/claims
 6. **Response** - decrypt the `DeviceResponse`; verify `IssuerAuth` (COSE_Sign1), per-element MSO digests, and `DeviceAuth` (COSE_Sign1/COSE_Mac0); display everything
 
-Only **mdoc peripheral server mode** (§8.3.3.1.1.2) is supported - i.e. the
-mdoc acts as the BLE GATT peripheral and this tool connects as central. An
-engagement that only offers **mdoc central client mode** (this tool would
-have to advertise as a BLE peripheral and wait for the mdoc to connect) is
-detected and reported, not silently mishandled.
+In central client mode the transport is reversed - this tool advertises and
+serves a GATT service (Table 6: `State`/`Client2Server`/`Server2Client`, plus
+an `Ident` characteristic the mdoc reads to confirm it connected to the right
+reader), and the mdoc connects, subscribes, and writes `STATE_START`:
+
+```
+siros-verify (GATT peripheral)         mdoc (wallet, GATT central)
+───────────────────────────────        ────────────────────────────
+Advertise centralClientModeUuid  ◀──── BLE ────  Scan, connect, read Ident, subscribe
+                                  ◀─────────────  Write STATE_START
+Notify SessionEstablishment       ─────────────▶  Decrypt, build response
+Collect SessionData response      ◀─────────────  Write response, write STATE_END
+```
+
+Both BLE retrieval methods are supported: **mdoc peripheral server mode**
+(§8.3.3.1.1.2, the mdoc is the GATT peripheral, this tool connects as
+central - via `bleak`) and **mdoc central client mode** (§8.3.3.1.1.3, this
+tool advertises as the GATT peripheral and the mdoc connects as central -
+via `bless`, requires the `peripheral` extra). Session crypto, request
+building, and response verification are identical either way - only the
+transport differs.
+
+**Central client mode is UNVERIFIED ON REAL HARDWARE.** It's the mirror
+image of `siros-sdk-kotlin`'s `BleCentralClient.kt`, itself unverified for
+the same reason: until this tool exists, there was nothing to test either
+side against. Both halves are implemented against the spec and against each
+other's expected wire behavior, but have not yet been run against real
+hardware together - test carefully before relying on this mode.
 
 ## Install
 
 ```bash
 pip install -e .
 # or, to read/display engagement QR codes without a phone-to-laptop file transfer:
-pip install -e ".[qr]"       # decode a QR image file, or render text as a QR page in a browser
-pip install -e ".[camera]"   # scan a QR code live with a webcam
+pip install -e ".[qr]"          # decode a QR image file, or render text as a QR page in a browser
+pip install -e ".[camera]"      # scan a QR code live with a webcam
+pip install -e ".[peripheral]"  # drive mdoc central client mode (advertise as a BLE peripheral) - Linux/BlueZ tested
 ```
 
 Requires Python ≥3.10 and a Bluetooth adapter on the host.
@@ -94,7 +118,8 @@ Other useful flags:
 - `--json` - print the decoded `DeviceResponse` as JSON instead of text
 - `--dump-cbor DIR` - write the raw CBOR of every protocol message (engagement, request, session establishment, session data, response) to `DIR`, for offline analysis
 - `--nfc-handover-hex HEX` / `--nfc-handover-file FILE` - if engagement happened via NFC static handover instead of QR
-- `-v` - log BLE transport progress (scan, connect, MTU, chunking)
+- `--advertise-timeout SECONDS` - mdoc central client mode only: how long to advertise while waiting for the mdoc to connect (default 30s; requires the `peripheral` extra)
+- `-v` - log BLE transport progress (scan/advertise, connect, MTU, chunking)
 
 Inspect a `DeviceEngagement` offline, without connecting to anything (also supports `--qr-image`/`--qr-camera`):
 
@@ -120,9 +145,9 @@ echo 'some text' | siros-verify qr show     # also reads from stdin
 - ✅ Per-element digests - recomputed and checked against the MSO's `valueDigests`
 - ✅ DeviceAuth (`deviceSignature`/`deviceMac`) - verified against the MSO's `deviceKey` (needs the reader's own ephemeral key + SessionTranscript, so this runs after parsing)
 - ✅ Per-document and per-element error codes (Table 8/9/15/20 of ISO 18013-5)
+- ✅ Both BLE retrieval methods (mdoc peripheral server mode via `bleak`, mdoc central client mode via `bless`) - central client mode is protocol-complete but **UNVERIFIED ON REAL HARDWARE**
 - ❌ Certificate chain / IACA trust anchor validation - **not done, ever**
 - ❌ Revocation checking - **not done, ever**
-- ❌ mdoc central client mode (reader-as-peripheral) - detected, not driven
 
 ## Roadmap
 

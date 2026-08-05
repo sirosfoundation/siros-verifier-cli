@@ -3,6 +3,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from siros_verifier.crypto import (
     build_session_transcript,
+    compute_ident,
     cose_key_tag,
     cose_key_to_public_key,
     decrypt_device_message,
@@ -62,3 +63,20 @@ def test_encrypt_decrypt_roundtrip():
 
     device_ciphertext = AESGCM(key).encrypt(gcm_iv(MDOC_IDENTIFIER, 1), plaintext, b"")
     assert decrypt_device_message(key, counter=1, ciphertext=device_ciphertext) == plaintext
+
+
+def test_compute_ident_matches_kotlin_sdk_cross_checked_vector():
+    # Cross-checked against siros-sdk-kotlin's ProximitySessionCryptoTest.kt
+    # (computeIdent_matchesRfc5869NoSaltSemantics_notATrulyEmptyHmacKey), which
+    # is itself independently cross-checked against this same `cryptography`
+    # HKDF(salt=None) behavior - confirms both implementations agree.
+    ikm = bytes(range(88))
+    assert compute_ident(ikm) == bytes.fromhex("0cd459a9fa6e6f91cba134e5e8c3c3ee")
+
+
+def test_compute_ident_is_deterministic_and_differs_by_input():
+    ikm1 = bytes(range(32))
+    ikm2 = bytes(range(1, 33))
+    assert compute_ident(ikm1) == compute_ident(ikm1)
+    assert compute_ident(ikm1) != compute_ident(ikm2)
+    assert len(compute_ident(ikm1)) == 16

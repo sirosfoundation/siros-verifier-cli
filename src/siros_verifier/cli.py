@@ -10,7 +10,7 @@ from pathlib import Path
 import cbor2
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from siros_verifier import ble, crypto, display, engagement, mdoc, qr
+from siros_verifier import ble, ble_peripheral, crypto, display, engagement, mdoc, qr
 from siros_verifier.engagement import DeviceEngagement, UnsupportedEngagementError
 
 TRUST_BANNER = (
@@ -100,9 +100,9 @@ def print_engagement(de: DeviceEngagement) -> None:
     print(f"central client mode UUID:    {de.central_client_uuid or '(not offered)'}")
     if not de.supports_peripheral_server_mode:
         print(
-            "\nNOTE: this engagement only offers mdoc central client mode (the mdoc "
-            "connects to a reader advertising as BLE peripheral). This tool only "
-            "drives mdoc peripheral server mode (reader as BLE central) - see README.",
+            "\nNOTE: this engagement only offers mdoc central client mode - this tool "
+            "will advertise as a BLE peripheral and wait for the mdoc to connect "
+            "(requires the 'peripheral' extra; UNVERIFIED ON REAL HARDWARE - see README).",
             file=sys.stderr,
         )
 
@@ -112,16 +112,6 @@ async def run_read(args: argparse.Namespace) -> int:
     de = engagement.parse_mdoc_uri(uri)
     print_engagement(de)
     _dump_cbor(args.dump_cbor, "engagement.cbor", de.raw_bytes)
-
-    if not de.supports_peripheral_server_mode:
-        print(
-            "\nerror: engagement does not offer mdoc peripheral server mode "
-            "(no key 10 in BleOptions) - this tool cannot drive central client mode",
-            file=sys.stderr,
-        )
-        return 1
-    peripheral_uuid = de.peripheral_server_uuid
-    assert peripheral_uuid is not None  # guaranteed by supports_peripheral_server_mode above
 
     e_reader_priv = ec.generate_private_key(ec.SECP256R1())
     e_reader_key_tag = crypto.cose_key_tag(e_reader_priv.public_key())
@@ -142,14 +132,26 @@ async def run_read(args: argparse.Namespace) -> int:
     log = (lambda msg: print(msg)) if args.verbose else (lambda _msg: None)
     print()
     try:
-        result = await ble.exchange(
-            peripheral_uuid,
-            session_establishment_bytes,
-            scan_timeout=args.scan_timeout,
-            response_timeout=args.response_timeout,
-            log=log,
-        )
-    except (ble.DeviceNotFoundError, asyncio.TimeoutError) as exc:
+        if de.supports_peripheral_server_mode:
+            assert de.peripheral_server_uuid is not None  # guaranteed by supports_peripheral_server_mode
+            result = await ble.exchange(
+                de.peripheral_server_uuid,
+                session_establishment_bytes,
+                scan_timeout=args.scan_timeout,
+                response_timeout=args.response_timeout,
+                log=log,
+            )
+        else:
+            assert de.central_client_uuid is not None  # parse() rejects engagements offering neither UUID
+            result = await ble_peripheral.exchange(
+                de.central_client_uuid,
+                de.e_device_key_bytes,
+                session_establishment_bytes,
+                advertise_timeout=args.advertise_timeout,
+                response_timeout=args.response_timeout,
+                log=log,
+            )
+    except (ble.DeviceNotFoundError, asyncio.TimeoutError, ImportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -295,7 +297,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     read_parser.add_argument("--nfc-handover-hex", help="Hex-encoded Handover Select NDEF message (NFC static handover)")
     read_parser.add_argument("--nfc-handover-file", help="File containing the raw Handover Select NDEF message")
-    read_parser.add_argument("--scan-timeout", type=float, default=10.0)
+    read_parser.add_argument("--scan-timeout", type=float, default=10.0, help="mdoc peripheral server mode: seconds to scan for the mdoc")
+    read_parser.add_argument(
+        "--advertise-timeout",
+        type=float,
+        default=30.0,
+        help="mdoc central client mode: seconds to advertise while waiting for the mdoc to connect (requires the 'peripheral' extra)",
+    )
     read_parser.add_argument("--response-timeout", type=float, default=15.0)
     read_parser.add_argument("--json", action="store_true", help="Print the DeviceResponse as JSON instead of text")
     read_parser.add_argument("--dump-cbor", metavar="DIR", help="Write raw CBOR of each protocol message to DIR")

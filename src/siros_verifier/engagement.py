@@ -34,6 +34,7 @@ class DeviceEngagement:
     version: str
     cipher_suite: int
     e_device_key_pub: ec.EllipticCurvePublicKey
+    e_device_key_bytes: bytes  # EDeviceKeyBytes as transmitted - needed by crypto.compute_ident
     retrieval_methods: list
     peripheral_server_uuid: uuid.UUID | None
     central_client_uuid: uuid.UUID | None
@@ -71,6 +72,7 @@ def parse(de_bytes: bytes) -> DeviceEngagement:
     security = de[1]  # [cipherSuite, EDeviceKeyBytes]
     cipher_suite = security[0]
     e_device_key_tag = security[1]
+    e_device_key_bytes = cbor2.dumps(e_device_key_tag)
     cose_key = cbor2.loads(e_device_key_tag.value)
     e_device_key_pub = cose_key_to_public_key(cose_key)
 
@@ -87,6 +89,7 @@ def parse(de_bytes: bytes) -> DeviceEngagement:
         version=version,
         cipher_suite=cipher_suite,
         e_device_key_pub=e_device_key_pub,
+        e_device_key_bytes=e_device_key_bytes,
         retrieval_methods=retrieval_methods,
         peripheral_server_uuid=peripheral_uuid,
         central_client_uuid=central_uuid,

@@ -82,6 +82,14 @@ def derive_emac_key(zab: bytes, session_transcript: bytes) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=b"EMacKey").derive(zab)
 
 
+def compute_ident(e_device_key_bytes: bytes) -> bytes:
+    """§11.1.3.1 `Ident` characteristic value (mdoc central client mode):
+    HKDF-SHA256(IKM=EDeviceKeyBytes, salt=None, info="BLEIdent", L=16).
+    `salt=None` is RFC 5869's real "no salt" default (32 zero bytes via
+    HMAC-SHA256) - not a zero-length key, which is a different computation."""
+    return HKDF(algorithm=hashes.SHA256(), length=16, salt=None, info=b"BLEIdent").derive(e_device_key_bytes)
+
+
 def gcm_iv(identifier: bytes, counter: int) -> bytes:
     """IV = identifier(8) || big-endian counter(4) - ISO 18013-5 §9.1.1.5 Table 8."""
     return identifier + struct.pack(">I", counter)
