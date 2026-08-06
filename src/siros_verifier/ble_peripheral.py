@@ -35,6 +35,17 @@ CLIENT2SERVER_UUID = "00000006-a123-48ce-896b-4c76973373e6"
 SERVER2CLIENT_UUID = "00000007-a123-48ce-896b-4c76973373e6"
 IDENT_UUID = "00000008-a123-48ce-896b-4c76973373e6"
 
+# Client Characteristic Configuration Descriptor (Bluetooth SIG, 0x2902) - the
+# standard descriptor a GATT client writes to subscribe to a notify/indicate
+# characteristic. `bless` (as of 0.3.0) never adds this automatically for a
+# characteristic registered with `notify` properties - confirmed via a real
+# Android central (`BluetoothGattCharacteristic.getDescriptors()` came back
+# empty for STATE/SERVER2CLIENT after real GATT service discovery), which
+# left `BleCentralClient.kt`'s (correct, spec-compliant) CCCD write with
+# nothing to write to, silently stalling the whole handshake before
+# STATE_START. Must be added explicitly per notify characteristic.
+CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+
 # bless does not expose a stable, cross-backend way to read the negotiated
 # ATT MTU per connected central as of 0.3.x - conservatively chunk at the
 # BLE 4.0 default MTU (23) minus the 3-byte ATT header. Real adapters
@@ -45,13 +56,18 @@ PERIPHERAL_CHUNK_SIZE = ble.MIN_CHUNK_SIZE
 
 def _require_bless():
     try:
-        from bless import BlessServer, GATTAttributePermissions, GATTCharacteristicProperties
+        from bless import (
+            BlessServer,
+            GATTAttributePermissions,
+            GATTCharacteristicProperties,
+            GATTDescriptorProperties,
+        )
     except ImportError as exc:
         raise ImportError(
             "mdoc central client mode requires the 'peripheral' extra: "
             "pip install 'siros-verifier-cli[peripheral]' (Linux/BlueZ is the tested backend)"
         ) from exc
-    return BlessServer, GATTCharacteristicProperties, GATTAttributePermissions
+    return BlessServer, GATTCharacteristicProperties, GATTAttributePermissions, GATTDescriptorProperties
 
 
 async def exchange(
@@ -66,7 +82,7 @@ async def exchange(
     the mdoc to connect and write STATE_START, notify SessionEstablishment,
     then collect and return the raw (still session-encrypted) SessionData
     response bytes."""
-    BlessServer, Props, Perms = _require_bless()
+    BlessServer, Props, Perms, GATTDescriptorProperties = _require_bless()
 
     loop = asyncio.get_running_loop()
     start_future: asyncio.Future[None] = loop.create_future()
@@ -96,13 +112,33 @@ async def exchange(
     await server.add_new_characteristic(
         service_uuid, IDENT_UUID, Props.read, bytearray(crypto.compute_ident(e_device_key_bytes)), Perms.readable
     )
+    # State is bidirectional here too, mirroring peripheral-server-mode's own
+    # State characteristic (notify + write-without-response) - the mdoc
+    # (BleCentralClient.kt) subscribes to it via CCCD before ever writing
+    # STATE_START, so `notify` must be set even though this side never
+    # actually notifies on it.
     await server.add_new_characteristic(
-        service_uuid, STATE_UUID, Props.write_without_response, None, Perms.writeable
+        service_uuid, STATE_UUID, Props.notify | Props.write_without_response, None, Perms.writeable
     )
     await server.add_new_characteristic(
         service_uuid, CLIENT2SERVER_UUID, Props.write_without_response, None, Perms.writeable
     )
     await server.add_new_characteristic(service_uuid, SERVER2CLIENT_UUID, Props.notify, None, Perms.readable)
+
+    # bless doesn't add a CCCD (0x2902) automatically for notify/indicate
+    # characteristics (see CCCD_UUID's doc comment) - without one, a real
+    # central has no standard descriptor to write to subscribe, and stalls
+    # forever before ever writing STATE_START. Read+write, matching the
+    # Bluetooth SIG's own CCCD definition (a client reads it to see current
+    # subscription state, writes it to change subscription state).
+    await server.add_new_descriptor(
+        service_uuid, STATE_UUID, CCCD_UUID, GATTDescriptorProperties.read | GATTDescriptorProperties.write,
+        bytearray(2), Perms.readable | Perms.writeable,
+    )
+    await server.add_new_descriptor(
+        service_uuid, SERVER2CLIENT_UUID, CCCD_UUID, GATTDescriptorProperties.read | GATTDescriptorProperties.write,
+        bytearray(2), Perms.readable | Perms.writeable,
+    )
 
     log(f"Advertising service {central_client_uuid} ...")
     await server.start()

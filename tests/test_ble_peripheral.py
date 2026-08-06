@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from enum import Flag, auto
 from typing import ClassVar
 
 import pytest
@@ -13,21 +14,31 @@ import pytest
 from siros_verifier import ble, ble_peripheral
 
 
-class _FakeProps:
-    read = "read"
-    write_without_response = "write_without_response"
-    notify = "notify"
+class _FakeProps(Flag):
+    """A real `Flag` enum (not plain strings) - matches bless's own
+    `GATTCharacteristicProperties`/`GATTDescriptorProperties` shape, since
+    ble_peripheral.py combines flags with `|` (e.g. `notify | write_without_response`)."""
+
+    read = auto()
+    write_without_response = auto()
+    notify = auto()
 
 
-class _FakePerms:
-    readable = "readable"
-    writeable = "writeable"
+class _FakeDescriptorProps(Flag):
+    read = auto()
+    write = auto()
+
+
+class _FakePerms(Flag):
+    readable = auto()
+    writeable = auto()
 
 
 class _FakeCharacteristic:
     def __init__(self, char_uuid, value):
         self.uuid = char_uuid
         self.value = value
+        self.descriptors: dict[str, bytearray] = {}
 
 
 class FakeBlessServer:
@@ -53,6 +64,9 @@ class FakeBlessServer:
     async def add_new_characteristic(self, service_uuid, char_uuid, properties, value, permissions):
         self.characteristics[char_uuid] = _FakeCharacteristic(char_uuid, value)
 
+    async def add_new_descriptor(self, service_uuid, char_uuid, desc_uuid, properties, value, permissions):
+        self.characteristics[char_uuid].descriptors[desc_uuid] = value
+
     def get_characteristic(self, char_uuid):
         return self.characteristics[char_uuid]
 
@@ -73,7 +87,9 @@ class FakeBlessServer:
 @pytest.fixture(autouse=True)
 def fake_bless(monkeypatch):
     FakeBlessServer.instances.clear()
-    monkeypatch.setattr(ble_peripheral, "_require_bless", lambda: (FakeBlessServer, _FakeProps, _FakePerms))
+    monkeypatch.setattr(
+        ble_peripheral, "_require_bless", lambda: (FakeBlessServer, _FakeProps, _FakePerms, _FakeDescriptorProps)
+    )
 
 
 def reassemble(chunks: list[bytes]) -> bytes:
@@ -131,6 +147,27 @@ def test_exchange_full_round_trip():
     assert result.session_data_bytes == b"session data response bytes"
     assert reassemble(server.notified_chunks[ble_peripheral.SERVER2CLIENT_UUID]) == b"session establishment bytes"
     assert server.stopped
+
+
+def test_exchange_registers_cccd_on_both_notify_characteristics():
+    """A real central (BleCentralClient.kt) subscribes to STATE and
+    SERVER2CLIENT via their CCCD before ever writing STATE_START - without
+    one, a real GATT client has no standard descriptor to write to and
+    stalls forever (see ble_peripheral.CCCD_UUID's doc comment)."""
+
+    async def run():
+        task = asyncio.create_task(
+            ble_peripheral.exchange(uuid.uuid4(), b"\x05" * 40, b"se", advertise_timeout=5.0, response_timeout=5.0)
+        )
+        await asyncio.sleep(0)
+        server = FakeBlessServer.instances[-1]
+        for char_uuid in (ble_peripheral.STATE_UUID, ble_peripheral.SERVER2CLIENT_UUID):
+            assert ble_peripheral.CCCD_UUID in server.characteristics[char_uuid].descriptors
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
 
 
 def test_exchange_raises_device_not_found_on_advertise_timeout():

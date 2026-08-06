@@ -72,6 +72,32 @@ def _resolve_handover(args: argparse.Namespace) -> list | None:
     return [handover_select, None]  # NFCHandover, static handover => Request message is null
 
 
+def _resolve_mode(mode: str, de: DeviceEngagement) -> bool:
+    """Returns True to use mdoc peripheral server mode (this tool connects
+    as a GATT central, via `ble.exchange`), False to use mdoc central client
+    mode (this tool advertises as a GATT peripheral, via
+    `ble_peripheral.exchange`).
+
+    `mode='auto'` (the default) prefers peripheral server mode whenever the
+    engagement offers it - matching most real readers, and this tool's own
+    original behavior before `--mode` existed. An engagement that offers
+    BOTH modes (as siros-sdk-kotlin/swift's sample apps always do) can never
+    have its central-client-mode role exercised under 'auto', since
+    peripheral server mode always wins - `--mode central` overrides that
+    preference to specifically test the mdoc's central-client-mode GATT
+    client role instead.
+    """
+    if mode == "peripheral":
+        if not de.supports_peripheral_server_mode:
+            raise SystemExit("error: --mode peripheral requested but this engagement doesn't offer mdoc peripheral server mode")
+        return True
+    if mode == "central":
+        if de.central_client_uuid is None:
+            raise SystemExit("error: --mode central requested but this engagement doesn't offer mdoc central client mode")
+        return False
+    return de.supports_peripheral_server_mode
+
+
 def _dump_cbor(dump_dir: str | None, name: str, data: bytes) -> None:
     if not dump_dir:
         return
@@ -129,11 +155,13 @@ async def run_read(args: argparse.Namespace) -> int:
     session_establishment_bytes = mdoc.build_session_establishment(e_reader_key_tag, ciphertext)
     _dump_cbor(args.dump_cbor, "session_establishment.cbor", session_establishment_bytes)
 
+    use_peripheral_mode = _resolve_mode(args.mode, de)
+
     log = (lambda msg: print(msg)) if args.verbose else (lambda _msg: None)
     print()
     try:
-        if de.supports_peripheral_server_mode:
-            assert de.peripheral_server_uuid is not None  # guaranteed by supports_peripheral_server_mode
+        if use_peripheral_mode:
+            assert de.peripheral_server_uuid is not None  # guaranteed by _resolve_mode
             result = await ble.exchange(
                 de.peripheral_server_uuid,
                 session_establishment_bytes,
@@ -294,6 +322,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="DOCTYPE:NAMESPACE:CLAIM,CLAIM",
         help=f"Requested document/namespace/claims, repeatable (default: {DEFAULT_REQUESTS[0]})",
+    )
+    read_parser.add_argument(
+        "--mode",
+        choices=["auto", "peripheral", "central"],
+        default="auto",
+        help=(
+            "Which BLE retrieval mode to use when the engagement offers both mdoc peripheral "
+            "server mode ('peripheral') and mdoc central client mode ('central') - default 'auto' "
+            "prefers peripheral server mode if offered. An engagement offering both modes can never "
+            "have its central-client-mode role exercised under 'auto'; pass 'central' to specifically "
+            "test that role instead (requires the 'peripheral' extra)."
+        ),
     )
     read_parser.add_argument("--nfc-handover-hex", help="Hex-encoded Handover Select NDEF message (NFC static handover)")
     read_parser.add_argument("--nfc-handover-file", help="File containing the raw Handover Select NDEF message")
