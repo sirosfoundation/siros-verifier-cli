@@ -15,11 +15,9 @@ sibling, since bleak itself is central/client-only on every platform. `bless`
 `func(characteristic)` / `func(characteristic, value)`) rather than
 per-characteristic callbacks, so dispatch by `characteristic.uuid` below.
 
-UNVERIFIED ON REAL HARDWARE beyond the mocked unit tests: this and
-siros-sdk-kotlin's BleCentralClient.kt (the mdoc-as-GATT-client counterpart)
-are two currently-untested-against-each-other halves of the same handshake.
-Test against a real mdoc central-client-mode implementation (or
-BleCentralClient.kt on a real Android device) before relying on this.
+Verified end-to-end against real hardware: siros-sdk-kotlin's
+BleCentralClient.kt (the mdoc-as-GATT-client counterpart) on a real Android
+device, via `siros-verify read --mode central`.
 """
 
 from __future__ import annotations
