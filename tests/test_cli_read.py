@@ -73,7 +73,11 @@ def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "
         "DeviceAuthentication",
         cbor2.loads(session_transcript_bytes),
         DOC_TYPE,
-        cbor2.dumps(device_namespaces_tag),
+        # Embed the tag object itself (a nested CBOR item), not its serialized
+        # bytes - the latter would double-bstr-wrap DeviceNameSpacesBytes,
+        # producing different signed bytes than a real mdoc's DeviceAuthentication
+        # (see mdoc.verify_device_auth's matching fix/comment).
+        device_namespaces_tag,
     ]
     detached_payload = cbor2.dumps(tagged24(device_authentication))
     device_protected = cbor2.dumps({1: -7})

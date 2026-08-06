@@ -264,7 +264,15 @@ def verify_device_auth(
         "DeviceAuthentication",
         cbor2.loads(session_transcript),
         doc.doc_type,
-        doc.device_namespaces_raw,
+        # device_namespaces_raw is already-serialized bytes (DeviceNameSpacesBytes,
+        # #6.24(bstr .cbor DeviceNameSpaces)) - decode it back to a CBORTag first so
+        # it's embedded as a nested CBOR item here, matching session_transcript's own
+        # treatment above. Embedding the raw bytes directly would encode it as an
+        # EXTRA CBOR byte string wrapping those bytes, producing different bytes than
+        # what the mdoc actually signed (which embeds the tag24 item directly, per
+        # ISO 18013-5 - the same class of bug this tool's own commit history already
+        # fixed once for the outer DeviceAuthentication/SessionTranscript wrapping).
+        cbor2.loads(doc.device_namespaces_raw),
     ]
     detached_payload = cbor2.dumps(cbor2.CBORTag(24, cbor2.dumps(device_authentication)))
 
