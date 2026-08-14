@@ -49,13 +49,21 @@ def parse_requests(specs: list[str]) -> list[mdoc.DocRequest]:
 
 def _resolve_engagement_uri(args: argparse.Namespace) -> str:
     if getattr(args, "qr_camera", False):
-        return qr.scan_camera(
+        uri = qr.scan_camera(
             timeout=args.qr_camera_timeout,
             camera_index=args.camera_index,
             log=lambda msg: print(msg, file=sys.stderr),
         )
+        # Everything after this point is BLE + the phone's own consent UI -
+        # the phone doesn't need to keep facing this machine's camera, and
+        # in practice the two are mutually exclusive (holding the screen
+        # toward the camera hides the consent prompt the phone shows next).
+        print("QR code captured - you can turn the phone's screen back to yourself now.", file=sys.stderr)
+        return uri
     if args.qr_image:
-        return engagement.read_qr_image(args.qr_image)
+        uri = engagement.read_qr_image(args.qr_image)
+        print("QR code decoded from image.", file=sys.stderr)
+        return uri
     if args.mdoc_uri:
         return args.mdoc_uri
     raise SystemExit("error: provide a `mdoc:...` URI, --qr-image, or --qr-camera")
