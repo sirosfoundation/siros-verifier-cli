@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass
 
 from bleak import BleakClient, BleakScanner
+from bleak.exc import BleakError
 
 # Fixed characteristic UUIDs, ISO/IEC 18013-5 Table 5 ("mdoc service").
 STATE_UUID = "00000001-a123-48ce-896b-4c76973373e6"
@@ -132,7 +133,15 @@ async def exchange(
         try:
             session_data_bytes = await asyncio.wait_for(response_future, timeout=response_timeout)
         finally:
-            await client.write_gatt_char(STATE_UUID, STATE_END, response=False)
+            # A malformed request commonly makes the mdoc disconnect before
+            # any response arrives - that's the expected/correct reaction,
+            # not a transport failure, so a stale-connection error here must
+            # not clobber the real TimeoutError/DeviceNotFoundError the
+            # caller is already handling.
+            try:
+                await client.write_gatt_char(STATE_UUID, STATE_END, response=False)
+            except BleakError as exc:
+                log(f"(couldn't send STATE_END, mdoc likely already disconnected: {exc})")
         negotiated_mtu = client.mtu_size
 
     return ExchangeResult(
