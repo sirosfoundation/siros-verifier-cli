@@ -334,12 +334,12 @@ async def run_fuzz(args: argparse.Namespace) -> int:
         device_request_bytes = mdoc.build_device_request(parse_requests(args.request or DEFAULT_REQUESTS))
         ciphertext = crypto.encrypt_reader_message(sk_reader, 1, device_request_bytes)
         session_establishment_bytes = mdoc.build_session_establishment(e_reader_key_tag, ciphertext)
-        result = await ble.exchange_dropping_tail(
+        chunk_result = await ble.exchange_dropping_tail(
             de.peripheral_server_uuid, session_establishment_bytes, args.scan_timeout, args.keep_fraction, log=log
         )
         print(
-            f"result: sent {result.chunks_sent}/{result.chunks_total} chunks to {result.device_address}, "
-            "then disconnected without completing the transfer",
+            f"result: sent {chunk_result.chunks_sent}/{chunk_result.chunks_total} chunks to "
+            f"{chunk_result.device_address}, then disconnected without completing the transfer",
             file=sys.stderr,
         )
         return 0
