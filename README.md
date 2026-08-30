@@ -149,9 +149,52 @@ echo 'some text' | siros-verify qr show     # also reads from stdin
 - ❌ Certificate chain / IACA trust anchor validation - **not done, ever**
 - ❌ Revocation checking - **not done, ever**
 
+## Stress-testing / fuzzing
+
+Beyond a normal `read`, this tool can deliberately drive malformed or abusive
+BLE proximity interactions, to check that an mdoc handles bad input by
+failing cleanly (a decline, a session-status error, a prompt disconnect)
+rather than hanging or crashing. This tool has no way to inspect the mdoc's
+own internal state - a human watching the wallet's own screen is the real
+oracle for "did it recover" vs "did it hang".
+
+**No new subcommand needed** - just `read` with the right flags:
+
+```bash
+# Request a docType/namespace the wallet has no matching credential for
+siros-verify read 'mdoc:AAAA...' --request nonexistent.doc.type:ns:some_claim
+
+# Mix a valid and an invalid docType in the same DeviceRequest
+siros-verify read 'mdoc:AAAA...' \
+    --request org.iso.18013.5.1.mDL:org.iso.18013.5.1:given_name \
+    --request nonexistent.doc.type:ns:some_claim
+
+# Race both BLE modes against each other (run concurrently, e.g. two terminals)
+siros-verify read 'mdoc:AAAA...' --mode peripheral &
+siros-verify read 'mdoc:AAAA...' --mode central
+```
+
+**`siros-verify fuzz SCENARIO 'mdoc:...'`** for scenarios that need a
+deliberately broken protocol message or transport behavior:
+
+| scenario | what it does |
+|---|---|
+| `garbage-cbor-request` | Structurally valid, correctly-encrypted SessionEstablishment whose decrypted DeviceRequest is random bytes, not CBOR at all. |
+| `corrupt-ciphertext` | Encrypts a real DeviceRequest, then flips a bit in the ciphertext - AES-GCM's integrity check should fail on decrypt. |
+| `truncated-session-establishment` | Builds a real SessionEstablishment, then truncates the encoded bytes before sending (`--keep-fraction`) - the outer CBOR structure itself is incomplete. |
+| `drop-mid-chunk` | Starts a real chunked SessionEstablishment transfer, then disconnects before sending the final chunk (`--keep-fraction`). |
+| `disconnect-after-connect` | Connects (optionally writing STATE_START), then disconnects immediately without ever sending a request (`--skip-state-start` to disconnect even earlier). |
+| `rapid-reconnect` | Connects and disconnects repeatedly in quick succession (`--cycles`, `--delay`), without ever sending a request - stresses the mdoc's own GATT re-advertise/teardown path under reader churn. |
+
+All six currently only support mdoc peripheral server mode (this tool as GATT
+central) - central-client-mode equivalents aren't implemented yet. Add
+`-v` to watch the BLE transport itself, or `--dump-cbor DIR` to inspect
+exactly what was sent.
+
 ## Roadmap
 
 - SD-JWT VC credential support (currently mdoc/CBOR only)
+- `fuzz` scenarios for mdoc central client mode (this tool as GATT peripheral)
 
 ## Development
 

@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import cbor2
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from siros_verifier import ble, ble_peripheral, crypto, display, engagement, mdoc, qr
+from siros_verifier import ble, ble_peripheral, crypto, display, engagement, fuzz, mdoc, qr
 from siros_verifier.engagement import DeviceEngagement, UnsupportedEngagementError
 
 TRUST_BANNER = (
@@ -141,7 +142,21 @@ def print_engagement(de: DeviceEngagement) -> None:
         )
 
 
-async def run_read(args: argparse.Namespace) -> int:
+@dataclass
+class SessionSetup:
+    de: DeviceEngagement
+    session_transcript: bytes
+    sk_reader: bytes
+    sk_device: bytes
+    e_reader_priv: ec.EllipticCurvePrivateKey
+    e_reader_key_tag: cbor2.CBORTag
+
+
+def _setup_session(args: argparse.Namespace) -> SessionSetup:
+    """Decode the engagement and derive session keys - the common prefix
+    shared by `read` and every `fuzz` scenario that needs a real,
+    correctly-keyed session to then deviate from (see fuzz.py's own doc
+    comment for which scenarios need this and which don't)."""
     uri = _resolve_engagement_uri(args)
     de = engagement.parse_mdoc_uri(uri)
     print_engagement(de)
@@ -154,6 +169,21 @@ async def run_read(args: argparse.Namespace) -> int:
     session_transcript = crypto.build_session_transcript(de.raw_bytes, e_reader_key_tag, handover)
     zab = e_reader_priv.exchange(ec.ECDH(), de.e_device_key_pub)
     sk_reader, sk_device = crypto.derive_session_keys(zab, session_transcript)
+    return SessionSetup(
+        de=de,
+        session_transcript=session_transcript,
+        sk_reader=sk_reader,
+        sk_device=sk_device,
+        e_reader_priv=e_reader_priv,
+        e_reader_key_tag=e_reader_key_tag,
+    )
+
+
+async def run_read(args: argparse.Namespace) -> int:
+    setup = _setup_session(args)
+    de, session_transcript = setup.de, setup.session_transcript
+    sk_reader, sk_device = setup.sk_reader, setup.sk_device
+    e_reader_priv, e_reader_key_tag = setup.e_reader_priv, setup.e_reader_key_tag
 
     doc_requests = parse_requests(args.request or DEFAULT_REQUESTS)
     device_request_bytes = mdoc.build_device_request(doc_requests)
@@ -210,6 +240,129 @@ async def run_read(args: argparse.Namespace) -> int:
     else:
         print_device_response(response)
     return 0 if response.status == 0 else 1
+
+
+def _require_peripheral_mode(de: DeviceEngagement, mode: str) -> None:
+    """Every fuzz scenario currently drives this tool as GATT central
+    against the mdoc's peripheral-server-mode role - the same role
+    task #417's original bug was found in. Central-client-mode scenarios
+    (this tool as peripheral) would need their own ble_peripheral.py-based
+    transport code; not yet implemented."""
+    if not _resolve_mode(mode, de):
+        raise SystemExit(
+            "error: fuzz scenarios currently only support mdoc peripheral server mode "
+            "(--mode peripheral, or --mode auto against an engagement that offers it)"
+        )
+
+
+async def run_fuzz(args: argparse.Namespace) -> int:
+    scenario = fuzz.Scenario(args.scenario)
+    print(f"scenario: {scenario.value}\n  {fuzz.SCENARIO_DESCRIPTIONS[scenario]}\n", file=sys.stderr)
+    log = (lambda msg: print(msg)) if args.verbose else (lambda _msg: None)
+
+    if scenario in fuzz.CIPHERTEXT_LEVEL_SCENARIOS:
+        setup = _setup_session(args)
+        _require_peripheral_mode(setup.de, args.mode)
+        assert setup.de.peripheral_server_uuid is not None  # guaranteed by _require_peripheral_mode
+
+        doc_requests = parse_requests(args.request or DEFAULT_REQUESTS)
+        device_request_bytes = mdoc.build_device_request(doc_requests)
+
+        if scenario is fuzz.Scenario.GARBAGE_CBOR_REQUEST:
+            session_establishment_bytes = fuzz.build_garbage_request_session_establishment(
+                setup.e_reader_key_tag, setup.sk_reader
+            )
+        elif scenario is fuzz.Scenario.CORRUPT_CIPHERTEXT:
+            session_establishment_bytes = fuzz.build_corrupt_ciphertext_session_establishment(
+                setup.e_reader_key_tag, setup.sk_reader, device_request_bytes
+            )
+        else:  # TRUNCATED_SESSION_ESTABLISHMENT
+            ciphertext = crypto.encrypt_reader_message(setup.sk_reader, 1, device_request_bytes)
+            full_bytes = mdoc.build_session_establishment(setup.e_reader_key_tag, ciphertext)
+            session_establishment_bytes = fuzz.truncate_session_establishment(full_bytes, args.keep_fraction)
+
+        _dump_cbor(args.dump_cbor, "fuzz_session_establishment.cbor", session_establishment_bytes)
+        try:
+            result = await ble.exchange(
+                setup.de.peripheral_server_uuid,
+                session_establishment_bytes,
+                scan_timeout=args.scan_timeout,
+                response_timeout=args.response_timeout,
+                log=log,
+            )
+        except (ble.DeviceNotFoundError, asyncio.TimeoutError) as exc:
+            print(f"result: no SessionData response within timeout - {exc}", file=sys.stderr)
+            print(
+                "(a timeout here can mean the mdoc is waiting/hung rather than replying - check its own screen)",
+                file=sys.stderr,
+            )
+            return 1
+
+        _dump_cbor(args.dump_cbor, "fuzz_session_data.cbor", result.session_data_bytes)
+        session_data = cbor2.loads(result.session_data_bytes)
+        if "data" not in session_data:
+            status = session_data.get("status")
+            name = SESSION_STATUS_NAMES.get(status, f"unknown({status})")
+            print(
+                f"result: mdoc returned SessionData with no data, status={status} ({name}) - "
+                "this is the expected/correct response to this scenario",
+                file=sys.stderr,
+            )
+            return 0
+        print(
+            "result: mdoc returned a decryptable DeviceResponse anyway (unexpected for this scenario):",
+            file=sys.stderr,
+        )
+        plaintext = crypto.decrypt_device_message(setup.sk_device, 1, session_data["data"])
+        print_device_response(mdoc.parse_device_response(plaintext))
+        return 0
+
+    # Transport-level scenarios never complete a normal message exchange, so
+    # none of them need session keys - just the engagement's peripheral UUID.
+    uri = _resolve_engagement_uri(args)
+    de = engagement.parse_mdoc_uri(uri)
+    print_engagement(de)
+    _require_peripheral_mode(de, args.mode)
+    assert de.peripheral_server_uuid is not None
+
+    if scenario is fuzz.Scenario.DROP_MID_CHUNK:
+        e_reader_priv = ec.generate_private_key(ec.SECP256R1())
+        e_reader_key_tag = crypto.cose_key_tag(e_reader_priv.public_key())
+        session_transcript = crypto.build_session_transcript(de.raw_bytes, e_reader_key_tag, _resolve_handover(args))
+        zab = e_reader_priv.exchange(ec.ECDH(), de.e_device_key_pub)
+        sk_reader, _sk_device = crypto.derive_session_keys(zab, session_transcript)
+        device_request_bytes = mdoc.build_device_request(parse_requests(args.request or DEFAULT_REQUESTS))
+        ciphertext = crypto.encrypt_reader_message(sk_reader, 1, device_request_bytes)
+        session_establishment_bytes = mdoc.build_session_establishment(e_reader_key_tag, ciphertext)
+        chunk_result = await ble.exchange_dropping_tail(
+            de.peripheral_server_uuid, session_establishment_bytes, args.scan_timeout, args.keep_fraction, log=log
+        )
+        print(
+            f"result: sent {chunk_result.chunks_sent}/{chunk_result.chunks_total} chunks to "
+            f"{chunk_result.device_address}, then disconnected without completing the transfer",
+            file=sys.stderr,
+        )
+        return 0
+
+    if scenario is fuzz.Scenario.DISCONNECT_AFTER_CONNECT:
+        address = await ble.connect_and_disconnect(
+            de.peripheral_server_uuid, args.scan_timeout, not args.skip_state_start, log=log
+        )
+        print(f"result: connected to {address}, then disconnected without sending any request data", file=sys.stderr)
+        return 0
+
+    if scenario is fuzz.Scenario.RAPID_RECONNECT:
+        results = await ble.rapid_reconnect_probe(
+            de.peripheral_server_uuid, args.scan_timeout, args.cycles, args.delay, log=log
+        )
+        failures = [r for r in results if r.error]
+        print(f"\nresult: {len(results)} connect/disconnect cycles, {len(failures)} failed", file=sys.stderr)
+        for r in results:
+            status = f"FAILED: {r.error}" if r.error else "ok"
+            print(f"  cycle {r.cycle}: {r.connect_seconds:.2f}s - {status}", file=sys.stderr)
+        return 1 if failures else 0
+
+    raise AssertionError(f"unhandled scenario {scenario}")  # pragma: no cover
 
 
 def _verdict(value: bool | None, true_word: str = "VALID", false_word: str = "INVALID") -> str:
@@ -358,6 +511,65 @@ def build_parser() -> argparse.ArgumentParser:
     read_parser.add_argument("-v", "--verbose", action="store_true", help="Log BLE transport progress")
     read_parser.set_defaults(handler=lambda args: asyncio.run(run_read(args)))
 
+    fuzz_parser = subparsers.add_parser(
+        "fuzz",
+        help="Drive a deliberately malformed/abusive BLE proximity interaction, to exercise the mdoc's error handling",
+        description=(
+            "Each scenario deviates from a normal `read` transaction in exactly one way. This tool "
+            "cannot see the mdoc's own internal state - watch the wallet's own screen to judge whether "
+            "it recovered cleanly or hung/crashed; this command's own output only reports what was put "
+            "on the wire and how the BLE transport itself behaved.\n\n"
+            "A few other useful stress cases need no `fuzz` scenario at all - use `read` directly: "
+            "requesting a docType/namespace the wallet has no matching credential for "
+            "(`read --request nonexistent.doc.type:ns:claim`), mixing a valid and an invalid docType in "
+            "the same DeviceRequest (repeat `--request`), or racing both BLE modes against each other "
+            "(`read --mode peripheral` and `read --mode central` against the same engagement, concurrently)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_engagement_source_args(fuzz_parser)
+    fuzz_parser.add_argument(
+        "scenario",
+        choices=[s.value for s in fuzz.Scenario],
+        help="Which deliberate deviation to drive - see this command's --help for what each one does",
+    )
+    fuzz_parser.add_argument(
+        "--request",
+        action="append",
+        metavar="DOCTYPE:NAMESPACE:CLAIM,CLAIM",
+        help=f"Only used by ciphertext-level scenarios (default: {DEFAULT_REQUESTS[0]})",
+    )
+    fuzz_parser.add_argument(
+        "--mode",
+        choices=["auto", "peripheral"],
+        default="auto",
+        help="Fuzz scenarios currently only support mdoc peripheral server mode",
+    )
+    fuzz_parser.add_argument("--nfc-handover-hex", help="Hex-encoded Handover Select NDEF message (NFC static handover)")
+    fuzz_parser.add_argument("--nfc-handover-file", help="File containing the raw Handover Select NDEF message")
+    fuzz_parser.add_argument("--scan-timeout", type=float, default=10.0, help="Seconds to scan for the mdoc")
+    fuzz_parser.add_argument("--response-timeout", type=float, default=15.0, help="Ciphertext-level scenarios only")
+    fuzz_parser.add_argument(
+        "--keep-fraction",
+        type=float,
+        default=0.7,
+        help="truncated-session-establishment/drop-mid-chunk only: fraction of bytes/chunks to actually send (0-1)",
+    )
+    fuzz_parser.add_argument(
+        "--skip-state-start",
+        action="store_true",
+        help="disconnect-after-connect only: disconnect before even writing STATE_START, not after",
+    )
+    fuzz_parser.add_argument(
+        "--cycles", type=int, default=20, help="rapid-reconnect only: number of connect/disconnect cycles"
+    )
+    fuzz_parser.add_argument(
+        "--delay", type=float, default=0.0, help="rapid-reconnect only: seconds to wait between cycles"
+    )
+    fuzz_parser.add_argument("--dump-cbor", metavar="DIR", help="Write raw CBOR of each protocol message to DIR")
+    fuzz_parser.add_argument("-v", "--verbose", action="store_true", help="Log BLE transport progress")
+    fuzz_parser.set_defaults(handler=lambda args: asyncio.run(run_fuzz(args)))
+
     engagement_parser = subparsers.add_parser("engagement", help="Inspect a DeviceEngagement without connecting")
     engagement_subparsers = engagement_parser.add_subparsers(dest="engagement_command", required=True)
     decode_parser = engagement_subparsers.add_parser("decode", help="Decode and print a DeviceEngagement")
@@ -386,6 +598,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if args.command == "read":
+    if args.command in ("read", "fuzz"):
         print(TRUST_BANNER, file=sys.stderr)
     sys.exit(args.handler(args))
