@@ -141,3 +141,99 @@ async def exchange(
         chunk_size=chunk_size,
         device_address=device.address,
     )
+
+
+@dataclass
+class ChunkDropResult:
+    device_address: str
+    chunks_sent: int
+    chunks_total: int
+
+
+async def exchange_dropping_tail(
+    peripheral_uuid: uuid.UUID,
+    session_establishment_bytes: bytes,
+    scan_timeout: float,
+    keep_fraction: float,
+    log=lambda _: None,
+) -> ChunkDropResult:
+    """Connect, start a real SessionEstablishment transfer, then disconnect
+    partway through instead of sending the final (0x00-prefixed) chunk -
+    `keep_fraction` of the chunks are sent, rounded down, and always at
+    least one short of the full set. Used by the `fuzz drop-mid-chunk`
+    scenario: the mdoc's own reassembler is left holding a partial message
+    it will never complete, checking that its own timeout/abort path
+    recovers instead of leaving the GATT connection open indefinitely."""
+    device = await scan_for_peripheral(peripheral_uuid, scan_timeout, log)
+    log(f"Found {device.address}, connecting...")
+    async with BleakClient(device) as client:
+        log(f"Connected. Negotiated MTU: {client.mtu_size}")
+        await client.start_notify(SERVER2CLIENT_UUID, lambda *_args: None)
+        await client.write_gatt_char(STATE_UUID, STATE_START, response=False)
+        chunk_size = negotiate_chunk_size(client.mtu_size)
+        chunks = chunk_message(session_establishment_bytes, chunk_size)
+        keep = max(1, min(len(chunks) - 1, int(len(chunks) * keep_fraction))) if len(chunks) > 1 else len(chunks)
+        log(f"Sending {keep}/{len(chunks)} chunks, then disconnecting without completing the transfer...")
+        for chunk in chunks[:keep]:
+            await client.write_gatt_char(CLIENT2SERVER_UUID, chunk, response=False)
+        # Deliberately no final chunk, no STATE_END - just fall out of
+        # `async with`, which disconnects without waiting for a response.
+    return ChunkDropResult(device_address=device.address, chunks_sent=keep, chunks_total=len(chunks))
+
+
+async def connect_and_disconnect(
+    peripheral_uuid: uuid.UUID,
+    scan_timeout: float,
+    write_state_start: bool,
+    log=lambda _: None,
+) -> str:
+    """Connect as central, optionally write STATE_START, then disconnect
+    immediately - no DeviceRequest is ever sent. Exercises the mdoc's
+    handling of a reader that connects and vanishes before doing anything
+    useful. Returns the connected device's address."""
+    device = await scan_for_peripheral(peripheral_uuid, scan_timeout, log)
+    log(f"Found {device.address}, connecting...")
+    async with BleakClient(device) as client:
+        log(f"Connected. Negotiated MTU: {client.mtu_size}")
+        if write_state_start:
+            await client.write_gatt_char(STATE_UUID, STATE_START, response=False)
+        log("Disconnecting immediately, without sending any request data.")
+    return device.address
+
+
+@dataclass
+class ReconnectCycleResult:
+    cycle: int
+    connect_seconds: float
+    error: str | None
+
+
+async def rapid_reconnect_probe(
+    peripheral_uuid: uuid.UUID,
+    scan_timeout: float,
+    cycles: int,
+    delay_seconds: float,
+    log=lambda _: None,
+) -> list[ReconnectCycleResult]:
+    """Connect and immediately disconnect, `cycles` times in a row (with
+    `delay_seconds` between attempts) - no DeviceRequest is ever sent.
+    Stress-tests the mdoc's own GATT-server re-advertise/teardown path
+    under reader churn: a role that doesn't tear down promptly on its own
+    failure/disconnect can leave a stale connection blocking the next
+    attempt, or fail to re-advertise at all after enough cycles."""
+    results: list[ReconnectCycleResult] = []
+    for cycle in range(1, cycles + 1):
+        start = asyncio.get_running_loop().time()
+        error: str | None = None
+        try:
+            device = await scan_for_peripheral(peripheral_uuid, scan_timeout, log)
+            async with BleakClient(device) as client:
+                log(f"[{cycle}/{cycles}] connected (MTU {client.mtu_size}), disconnecting immediately")
+        except Exception as exc:  # noqa: BLE001 - reporting every failure mode is the point of this probe
+            error = f"{type(exc).__name__}: {exc}"
+            log(f"[{cycle}/{cycles}] FAILED: {error}")
+        elapsed = asyncio.get_running_loop().time() - start
+        results.append(ReconnectCycleResult(cycle=cycle, connect_seconds=elapsed, error=error))
+        if cycle < cycles and delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+    return results
