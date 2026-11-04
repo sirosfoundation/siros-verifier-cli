@@ -116,7 +116,7 @@ siros-verify read 'mdoc:AAAA...' \
 Other useful flags:
 
 - `--json` - print the decoded `DeviceResponse` as JSON instead of text
-- `--dump-cbor DIR` - write the raw CBOR of every protocol message (engagement, request, session establishment, session data, response) to `DIR`, for offline analysis
+- `--dump-cbor DIR` - write engagement and request-side CBOR (engagement, DeviceRequest, SessionEstablishment) to `DIR`, for offline analysis. SessionData/DeviceResponse dumps are disabled because elements are requested with `intentToRetain=false`; retaining them would contradict the holder's consent.
 - `--nfc-handover-hex HEX` / `--nfc-handover-file FILE` - if engagement happened via NFC static handover instead of QR
 - `--advertise-timeout SECONDS` - mdoc central client mode only: how long to advertise while waiting for the mdoc to connect (default 30s; requires the `peripheral` extra)
 - `-v` - log BLE transport progress (scan/advertise, connect, MTU, chunking)

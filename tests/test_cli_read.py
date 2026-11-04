@@ -153,6 +153,23 @@ def test_read_end_to_end_json(wallet_engagement, monkeypatch, capsys):
     assert doc["device_auth_valid"] is True
 
 
+def test_read_dump_cbor_does_not_retain_response(wallet_engagement, monkeypatch, capsys, tmp_path):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
+
+    args = cli.build_parser().parse_args(["read", mdoc_uri, "--dump-cbor", str(tmp_path)])
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 0
+    assert {path.name for path in tmp_path.iterdir()} == {
+        "engagement.cbor",
+        "device_request.cbor",
+        "session_establishment.cbor",
+    }
+    captured = capsys.readouterr()
+    assert "SessionData/DeviceResponse dumps are disabled" in captured.err
+
+
 def test_read_end_to_end_detects_tampered_device_signature(wallet_engagement, monkeypatch, capsys):
     device_priv, de_bytes, mdoc_uri = wallet_engagement
     monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, tamper_device_signature=True))
