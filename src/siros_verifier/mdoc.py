@@ -53,7 +53,7 @@ class DocRequest:
 def build_device_request(doc_requests: list[DocRequest]) -> bytes:
     requests = []
     for dr in doc_requests:
-        name_spaces = {ns: {claim: True for claim in claims} for ns, claims in dr.namespaces.items()}
+        name_spaces = {ns: {claim: False for claim in claims} for ns, claims in dr.namespaces.items()}
         items_request = {"docType": dr.doc_type, "nameSpaces": name_spaces}
         requests.append({"itemsRequest": cbor2.CBORTag(24, cbor2.dumps(items_request))})
     return cbor2.dumps({"version": "1.0", "docRequests": requests})
