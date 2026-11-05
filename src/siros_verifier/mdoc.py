@@ -324,14 +324,32 @@ def _aware_datetime(value: object) -> datetime | None:
     return value
 
 
+def _valid_document_errors(errors: object) -> bool:
+    return isinstance(errors, list) and all(
+        isinstance(item, dict)
+        and all(isinstance(doc_type, str) and type(code) is int for doc_type, code in item.items())
+        for item in errors
+    )
+
+
+def _valid_element_errors(errors: object) -> bool:
+    return isinstance(errors, dict) and all(
+        isinstance(namespace, str)
+        and isinstance(items, dict)
+        and all(isinstance(identifier, str) and type(code) is int for identifier, code in items.items())
+        for namespace, items in errors.items()
+    )
+
+
 def validate_device_response(
     response: DeviceResponseResult, doc_requests: list[DocRequest], *, now: datetime | None = None
 ) -> list[str]:
     """Return request/cryptographic validation failures; an empty list permits disclosure.
 
     Every requested document type, namespace, and element is required. Unrequested
-    document types are rejected, while additional valid disclosed claims are allowed.
-    No certificate-chain or authorization decision is made here.
+    document types are rejected, while additional valid issuer-signed claims are
+    allowed. Nonempty device-signed namespaces are rejected until their MSO
+    keyAuthorizations can be enforced. No trust decision is made here.
     """
     errors: list[str] = []
     if response.version != "1.0":
@@ -340,6 +358,8 @@ def validate_device_response(
         errors.append("response_status_not_ok")
     if not response.documents:
         errors.append("document_count")
+    if not _valid_document_errors(response.document_errors):
+        errors.append("invalid_document_errors")
 
     for requested in doc_requests:
         if not any(doc.doc_type == requested.doc_type for doc in response.documents):
@@ -394,6 +414,10 @@ def validate_device_response(
 
         if doc.device_auth_valid is not True:
             errors.append(f"{prefix}: device_auth_not_valid")
+        if not isinstance(doc.device_namespaces, dict) or doc.device_namespaces:
+            errors.append(f"{prefix}: device_namespaces_unsupported")
+        if not _valid_element_errors(doc.errors):
+            errors.append(f"{prefix}: invalid_errors")
 
         for requested in matching_requests:
             for namespace, requested_elements in requested.namespaces.items():
