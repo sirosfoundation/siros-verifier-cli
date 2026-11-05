@@ -228,7 +228,7 @@ def _parse_document(doc: dict) -> ParsedDocument:
 
     device_signed = doc.get("deviceSigned") or {}
     device_namespaces_tag = device_signed.get("nameSpaces")
-    device_namespaces = (_unwrap_tagged24(device_namespaces_tag) or {}) if device_namespaces_tag else {}
+    device_namespaces = _unwrap_tagged24(device_namespaces_tag) if device_namespaces_tag else {}
     device_namespaces_raw = cbor2.dumps(device_namespaces_tag) if device_namespaces_tag is not None else None
     device_auth = device_signed.get("deviceAuth") or {}
     device_auth_type = next(iter(device_auth), None)
@@ -253,6 +253,8 @@ def verify_device_auth(
     private key and the SessionTranscript, so this runs as a separate pass
     over an already-parsed ParsedDocument rather than inside parse_device_response."""
     mso = doc.issuer_auth.mso if doc.issuer_auth else None
+    if not isinstance(doc.device_auth_cbor, dict) or len(doc.device_auth_cbor) != 1:
+        return None
     if not doc.device_auth_type or mso is None or mso.device_key is None or doc.device_namespaces_raw is None:
         return None
     try:
