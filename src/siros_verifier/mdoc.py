@@ -81,15 +81,19 @@ def _preserve_bignum_tag(tag: int):
 _BIGNUM_DECODERS = {2: _preserve_bignum_tag(2), 3: _preserve_bignum_tag(3)}
 
 
+def _loads(data: bytes):
+    stream = io.BytesIO(data)
+    decoded = cbor2.CBORDecoder(stream, semantic_decoders=_BIGNUM_DECODERS).decode(immutable=False)
+    if stream.tell() != len(data):
+        raise MdocStructureError("trailing CBOR data")
+    return decoded
+
+
 def _unwrap_tagged24(value):
     """Decode exactly one CBOR item from a required tag-24 byte string."""
     if not isinstance(value, cbor2.CBORTag) or value.tag != 24 or not isinstance(value.value, bytes):
         raise MdocStructureError("expected tag-24 encoded bytes")
-    stream = io.BytesIO(value.value)
-    decoded = cbor2.CBORDecoder(stream, semantic_decoders=_BIGNUM_DECODERS).decode(immutable=False)
-    if stream.tell() != len(value.value):
-        raise MdocStructureError("trailing data in tag-24 encoded bytes")
-    return decoded
+    return _loads(value.value)
 
 
 @dataclass
@@ -161,7 +165,7 @@ class IssuerAuthInfo:
             raise MdocStructureError("invalid IssuerAuth COSE headers")
         if not isinstance(payload, bytes) or not isinstance(signature, bytes):
             raise MdocStructureError("invalid IssuerAuth COSE payload or signature")
-        protected = cbor2.loads(protected_bytes) if protected_bytes else {}
+        protected = _loads(protected_bytes) if protected_bytes else {}
         alg = protected.get(1, unprotected.get(1))
         if alg is not None and type(alg) is not int:
             raise MdocStructureError("COSE algorithm must be an integer")
@@ -187,7 +191,7 @@ class IssuerAuthInfo:
             except verify.UnsupportedAlgorithm:
                 signature_valid = None
 
-        mso_cbor = _unwrap_tagged24(cbor2.loads(payload)) if payload else None
+        mso_cbor = _unwrap_tagged24(_loads(payload)) if payload else None
         mso = MobileSecurityObject.from_cbor(mso_cbor) if isinstance(mso_cbor, Mapping) else None
 
         return cls(
@@ -353,7 +357,7 @@ def verify_device_auth(
 
     device_authentication = [
         "DeviceAuthentication",
-        cbor2.loads(session_transcript),
+        _loads(session_transcript),
         doc.doc_type,
         # device_namespaces_raw is already-serialized bytes (DeviceNameSpacesBytes,
         # #6.24(bstr .cbor DeviceNameSpaces)) - decode it back to a CBORTag first so
@@ -363,7 +367,7 @@ def verify_device_auth(
         # what the mdoc actually signed (which embeds the tag24 item directly, per
         # ISO 18013-5 - the same class of bug this tool's own commit history already
         # fixed once for the outer DeviceAuthentication/SessionTranscript wrapping).
-        cbor2.loads(doc.device_namespaces_raw),
+        _loads(doc.device_namespaces_raw),
     ]
     detached_payload = cbor2.dumps(cbor2.CBORTag(24, cbor2.dumps(device_authentication)))
 
@@ -388,7 +392,7 @@ def verify_device_auth(
 
 
 def parse_device_response(plaintext: bytes) -> DeviceResponseResult:
-    device_response = cbor2.loads(plaintext)
+    device_response = _loads(plaintext)
     if not isinstance(device_response, Mapping):
         raise MdocStructureError("DeviceResponse must be a map")
     raw_documents = device_response.get("documents", [])

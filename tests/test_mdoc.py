@@ -251,11 +251,23 @@ def test_validate_device_response_rejects_malformed_element_errors(errors):
     assert any("invalid_errors" in error for error in validation_errors(result))
 
 
+def test_validate_device_response_rejects_bignum_error_code():
+    result = validatable_response()
+    result.documents[0].errors = {"ns": {"other": cbor2.CBORTag(2, b"\x01")}}
+    assert any("invalid_errors" in error for error in validation_errors(result))
+
+
 @pytest.mark.parametrize("errors", [{}, [{"doc": False}], [{"doc": []}], [{"doc": 1 << 20000}]])
 def test_validate_device_response_rejects_malformed_document_errors(errors):
     result = validatable_response()
     result.document_errors = errors
     assert "invalid_document_errors" in validation_errors(result)
+
+
+def test_validate_device_response_rejects_bignum_status():
+    result = validatable_response(status=cbor2.CBORTag(2, b"\x01"))
+    result.documents[0].device_auth_valid = True
+    assert "response_status_not_ok" in validation_errors(result)
 
 
 def test_validate_device_response_requires_status_member():
