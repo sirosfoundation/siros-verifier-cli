@@ -52,7 +52,8 @@ def make_signed_document(
     replay_inline_device_auth: bool = False,
     device_auth_method: str = "signature",
     e_reader_pub: ec.EllipticCurvePublicKey | None = None,
-    device_namespaces: dict | None = None,
+    device_namespaces: object = None,
+    additional_device_auth: dict | None = None,
     errors: object = None,
 ) -> dict:
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -92,7 +93,7 @@ def make_signed_document(
     issuer_sig_structure = cbor2.dumps(["Signature1", protected, b"", mso_payload])
     issuer_auth = [protected, {33: cert_der}, mso_payload, sign_es256_raw(ds_priv, issuer_sig_structure)]
 
-    device_namespaces_tag = tagged24(device_namespaces or {})
+    device_namespaces_tag = tagged24(device_namespaces if device_namespaces is not None else {})
     replay_inline = replay_inline_device_signature or replay_inline_device_auth
     signing_transcript_bytes = session_transcript_bytes
     if replay_inline:
@@ -130,6 +131,7 @@ def make_signed_document(
         if tamper_device_signature:
             device_signature = b"\x00" * 64
         device_auth = {"deviceSignature": [device_protected, {}, cose_payload, device_signature]}
+    device_auth.update(additional_device_auth or {})
 
     return {
         "docType": DOC_TYPE,
@@ -240,6 +242,8 @@ def test_read_end_to_end_rejects_invalid_device_auth(wallet_engagement, monkeypa
         ({"device_namespaces": {"org.iso.18013.5.1": {"device_claim": "value"}}}, "device_namespaces_unsupported"),
         ({"errors": {"org.iso.18013.5.1": {"other": []}}}, "invalid_errors"),
         ({"errors": {"org.iso.18013.5.1": {"other": 1 << 20000}}}, "invalid_errors"),
+        ({"device_namespaces": []}, "device_namespaces_unsupported"),
+        ({"additional_device_auth": {"deviceMac": [b"", {}, None, b""]}}, "device_auth_not_valid"),
     ],
 )
 def test_read_rejects_unsafe_response_content(
