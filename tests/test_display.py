@@ -68,6 +68,17 @@ def test_json_preserves_original_string_keys():
     assert "\\u001b" in json_text
 
 
+def test_json_key_collision_uses_lossless_entries():
+    converted = display.to_jsonable({"1": "string key", 1: "integer key"})
+
+    assert converted == {
+        "entries": [
+            {"key": "1", "value": "string key"},
+            {"key": 1, "value": "integer key"},
+        ]
+    }
+
+
 def test_nested_composite_escaping_is_not_exponential():
     value = "x\x1b"
     for _ in range(20):
