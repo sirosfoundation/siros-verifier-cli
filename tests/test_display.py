@@ -68,6 +68,17 @@ def test_json_preserves_original_string_keys():
     assert "\\u001b" in json_text
 
 
+def test_nested_composite_escaping_is_not_exponential():
+    value = "x\x1b"
+    for _ in range(20):
+        value = (value,)
+
+    text = display.safe_text(value)
+
+    assert len(text) < 1000
+    assert text.count("\\x1b") == 1
+
+
 def test_late_rendering_failure_emits_no_partial_claims(capsys):
     class FailingRepr:
         def __repr__(self):
