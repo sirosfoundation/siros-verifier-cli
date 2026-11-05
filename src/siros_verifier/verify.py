@@ -46,7 +46,7 @@ def _sig_structure(context: str, protected_bytes: bytes, payload: bytes, externa
     return cbor2.dumps([context, protected_bytes, external_aad, payload])
 
 
-def _cose_alg(cose_struct: list) -> int:
+def _cose_alg(cose_struct: list | tuple) -> int:
     protected_bytes, unprotected = cose_struct[0], cose_struct[1]
     protected = cbor2.loads(protected_bytes) if protected_bytes else {}
     alg = protected.get(1, unprotected.get(1))
@@ -56,7 +56,7 @@ def _cose_alg(cose_struct: list) -> int:
 
 
 def verify_cose_sign1(
-    cose_sign1: list,
+    cose_sign1: list | tuple,
     public_key,
     detached_payload: bytes | None = None,
     external_aad: bytes = b"",
@@ -98,7 +98,7 @@ def verify_cose_sign1(
 
 
 def verify_cose_mac0(
-    cose_mac0: list,
+    cose_mac0: list | tuple,
     mac_key: bytes,
     detached_payload: bytes | None = None,
     external_aad: bytes = b"",

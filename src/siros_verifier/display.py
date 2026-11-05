@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+from collections.abc import Mapping
 
 import cbor2
 
@@ -36,7 +37,7 @@ def safe_text(value: object) -> str:
         text = f"#6.{value.tag}({safe_text(value.value)})"
     elif isinstance(value, (list, tuple)):
         text = "[" + ", ".join(safe_text(item) for item in value) + "]"
-    elif isinstance(value, dict):
+    elif isinstance(value, Mapping):
         text = "{" + ", ".join(f"{safe_text(key)}: {safe_text(item)}" for key, item in value.items()) + "}"
     else:
         text = str(value)
@@ -56,7 +57,7 @@ def format_value(value: object) -> str:
         return value.isoformat()
     if isinstance(value, cbor2.CBORTag):
         return f"#6.{value.tag}({format_value(value.value)})"
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         inner = ", ".join(f"{safe_text(k)}: {format_value(v)}" for k, v in value.items())
         return "{" + inner + "}"
     if isinstance(value, (list, tuple)):
@@ -81,7 +82,7 @@ def to_jsonable(value: object) -> object:
         return value.isoformat()
     if isinstance(value, cbor2.CBORTag):
         return {"tag": value.tag, "value": to_jsonable(value.value)}
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {safe_text(k): to_jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [to_jsonable(v) for v in value]
