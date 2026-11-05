@@ -87,7 +87,13 @@ def to_jsonable(value: object) -> object:
     if isinstance(value, cbor2.CBORTag):
         return {"tag": value.tag, "value": to_jsonable(value.value)}
     if isinstance(value, Mapping):
-        return {(k if isinstance(k, str) else safe_text(k)): to_jsonable(v) for k, v in value.items()}
+        converted = {}
+        for key, item in value.items():
+            json_key = key if isinstance(key, str) else safe_text(key)
+            if json_key in converted:
+                return {"entries": [{"key": to_jsonable(k), "value": to_jsonable(v)} for k, v in value.items()]}
+            converted[json_key] = to_jsonable(item)
+        return converted
     if isinstance(value, (list, tuple)):
         return [to_jsonable(v) for v in value]
     if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):

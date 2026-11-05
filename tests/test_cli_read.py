@@ -98,9 +98,12 @@ def make_signed_document(
     device_namespaces_tag = tagged24(raw_device_namespaces) if device_namespaces_tagged else raw_device_namespaces
     replay_inline = replay_inline_device_signature or replay_inline_device_auth
     signing_transcript_bytes = session_transcript_bytes
+    signing_reader_pub = e_reader_pub
     if replay_inline:
         current_transcript = cbor2.loads(session_transcript_bytes)
-        historical_reader_key = crypto.cose_key_tag(ec.generate_private_key(ec.SECP256R1()).public_key())
+        historical_reader_priv = ec.generate_private_key(ec.SECP256R1())
+        signing_reader_pub = historical_reader_priv.public_key()
+        historical_reader_key = crypto.cose_key_tag(signing_reader_pub)
         signing_transcript_bytes = crypto.build_session_transcript(
             current_transcript[0].value, historical_reader_key, current_transcript[2]
         )
@@ -118,7 +121,7 @@ def make_signed_document(
     cose_payload = detached_payload if replay_inline else None
     if device_auth_method == "mac":
         assert e_reader_pub is not None
-        zab = device_key_priv.exchange(ec.ECDH(), e_reader_pub)
+        zab = device_key_priv.exchange(ec.ECDH(), signing_reader_pub)
         emac_key = crypto.derive_emac_key(zab, signing_transcript_bytes)
         device_protected = cbor2.dumps({1: 5})
         mac_structure = cbor2.dumps(["MAC0", device_protected, b"", detached_payload])
