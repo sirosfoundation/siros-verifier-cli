@@ -226,6 +226,20 @@ def test_validate_device_response_requires_integer_zero_status(status):
     assert "response_status_not_ok" in validation_errors(result)
 
 
+@pytest.mark.parametrize("errors", [[], {"ns": []}, {"ns": {"claim": True}}])
+def test_validate_device_response_rejects_malformed_element_errors(errors):
+    result = validatable_response()
+    result.documents[0].errors = errors
+    assert any("invalid_errors" in error for error in validation_errors(result))
+
+
+@pytest.mark.parametrize("errors", [{}, [{"doc": False}], [{"doc": []}]])
+def test_validate_device_response_rejects_malformed_document_errors(errors):
+    result = validatable_response()
+    result.document_errors = errors
+    assert "invalid_document_errors" in validation_errors(result)
+
+
 def test_validate_device_response_requires_status_member():
     decoded = cbor2.loads(build_device_response_bytes())
     del decoded["status"]

@@ -48,6 +48,8 @@ def make_signed_document(
     given_name: str = "Alice",
     tamper_device_signature: bool = False,
     replay_inline_device_signature: bool = False,
+    device_namespaces: dict | None = None,
+    errors: object = None,
 ) -> dict:
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -86,7 +88,7 @@ def make_signed_document(
     issuer_sig_structure = cbor2.dumps(["Signature1", protected, b"", mso_payload])
     issuer_auth = [protected, {33: cert_der}, mso_payload, sign_es256_raw(ds_priv, issuer_sig_structure)]
 
-    device_namespaces_tag = tagged24({})
+    device_namespaces_tag = tagged24(device_namespaces or {})
     signing_transcript_bytes = session_transcript_bytes
     if replay_inline_device_signature:
         current_transcript = cbor2.loads(session_transcript_bytes)
@@ -117,6 +119,7 @@ def make_signed_document(
         "docType": DOC_TYPE,
         "issuerSigned": {"nameSpaces": {"org.iso.18013.5.1": issuer_signed_items}, "issuerAuth": issuer_auth},
         "deviceSigned": {"nameSpaces": device_namespaces_tag, "deviceAuth": device_auth},
+        "errors": errors if errors is not None else {},
     }
 
 
@@ -210,5 +213,30 @@ def test_read_end_to_end_rejects_invalid_device_auth(wallet_engagement, monkeypa
     assert rc == 1
     captured = capsys.readouterr()
     assert "device_auth_not_valid" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize(
+    ("document_kwargs", "expected_error"),
+    [
+        ({"device_namespaces": {"org.iso.18013.5.1": {"device_claim": "value"}}}, "device_namespaces_unsupported"),
+        ({"errors": {"org.iso.18013.5.1": {"other": []}}}, "invalid_errors"),
+    ],
+)
+def test_read_rejects_unsafe_response_content(
+    wallet_engagement, monkeypatch, capsys, json_output, document_kwargs, expected_error
+):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, **document_kwargs))
+
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert expected_error in captured.err
     assert "given_name" not in captured.out
     assert "family_name" not in captured.out

@@ -145,8 +145,9 @@ echo 'some text' | siros-verify qr show     # also reads from stdin
 - ✅ Per-element digests - recomputed and checked against the MSO's `valueDigests`
 - ✅ DeviceAuth (`deviceSignature`/`deviceMac`) - verified against the MSO's `deviceKey` (needs the reader's own ephemeral key + SessionTranscript, so this runs after parsing)
 - ✅ MSO validity period and document/MSO docType consistency - enforced before disclosure
-- ✅ Request policy - every requested document type, namespace, and element is required; unrequested document types are rejected; extra valid claims are allowed
-- ✅ Fail-closed disclosure - any response-status, cryptographic, validity, or request-policy failure exits nonzero without printing claims
+- ✅ Request policy - every requested document type, namespace, and element is required; unrequested document types are rejected; extra valid issuer-signed claims are allowed
+- ✅ Disclosure safety - nonempty device-signed namespaces are rejected until MSO `keyAuthorizations` are enforced, and all document/element error maps and integer codes are validated before output
+- ✅ Fail-closed disclosure - any response-status, cryptographic, validity, request-policy, or response-structure failure exits nonzero without printing claims
 - ✅ Per-document and per-element error codes (Table 8/9/15/20 of ISO 18013-5)
 - ✅ Both BLE retrieval methods (mdoc peripheral server mode via `bleak`, mdoc central client mode via `bless`) - central client mode is protocol-complete but **UNVERIFIED ON REAL HARDWARE**
 - ❌ Certificate chain / IACA trust anchor validation - **not done, ever**
