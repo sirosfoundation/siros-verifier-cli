@@ -75,7 +75,11 @@ def to_jsonable(value: object) -> object:
     """Recursively convert decoded values (dataclasses, CBOR tags, bytes,
     dates, ...) into something `json.dumps` can serialize."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {f.name: to_jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
+        return {
+            f.name: to_jsonable(getattr(value, f.name))
+            for f in dataclasses.fields(value)
+            if not f.metadata.get("json_exclude")
+        }
     if isinstance(value, bytes):
         return {"hex": value.hex()}
     if isinstance(value, (datetime.datetime, datetime.date)):

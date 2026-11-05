@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import os
 import sys
 from contextlib import redirect_stdout
 from dataclasses import dataclass
@@ -13,15 +14,15 @@ from pathlib import Path
 import cbor2
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from siros_verifier import ble, ble_peripheral, crypto, display, engagement, fuzz, mdoc, qr
+from siros_verifier import ble, ble_peripheral, crypto, display, engagement, fuzz, mdoc, qr, trust
 from siros_verifier.engagement import DeviceEngagement, UnsupportedEngagementError
 
 TRUST_BANNER = (
     "This tool cryptographically verifies IssuerAuth/DeviceAuth signatures, MACs, and\n"
-    "digests against the key/certificate presented in the message itself. It does NOT\n"
-    "evaluate trust: certificate chains are never validated against an IACA root, and\n"
-    "revocation is never checked. A VALID result means \"internally consistent\", not\n"
-    "\"trustworthy\" - do not make trust decisions based on this output."
+    "digests against the key/certificate presented in the message itself. Without\n"
+    "--pdp-url it does NOT evaluate trust or check IACA chains/revocation: VALID means\n"
+    "\"internally consistent\", not \"trustworthy\". With --pdp-url, claims are released\n"
+    "only after an explicit go-trust permit for every document."
 )
 
 DEFAULT_REQUESTS = ["org.iso.18013.5.1.mDL:org.iso.18013.5.1:given_name,family_name"]
@@ -258,6 +259,19 @@ async def run_read(args: argparse.Namespace) -> int:
         for error in validation_errors:
             print(f"  - {_safe_diagnostic(error)}", file=sys.stderr)
         return 1
+
+    if args.pdp_url is not None:
+        try:
+            await trust.authorize_documents(
+                response.documents,
+                args.pdp_url,
+                args.mdoc_issuer_role,
+                os.environ.get(trust.PDP_BEARER_TOKEN_ENV),
+            )
+        except trust.TrustError as exc:
+            print(f"error: go-trust authorization failed; no claims released: {_safe_diagnostic(exc)}", file=sys.stderr)
+            return 1
+        print(f"go-trust: explicit permit for {len(response.documents)} document(s)", file=sys.stderr)
 
     try:
         if args.json:
@@ -500,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Commandline ISO/IEC 18013-5 BLE proximity verifier for debugging mdoc "
             "device retrieval. Signatures/MACs/digests are verified against the "
-            "presented key; trust evaluation (chain/IACA/revocation) is out of scope."
+            "presented key; optional per-document trust decisions are delegated to go-trust."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -551,6 +565,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="mdoc central client mode: seconds to advertise while waiting for the mdoc to connect (requires the 'peripheral' extra)",
     )
     read_parser.add_argument("--response-timeout", type=float, default=15.0)
+    read_parser.add_argument(
+        "--pdp-url",
+        help="Full go-trust AuthZEN evaluation URL; require an explicit permit for every document before disclosure",
+    )
+    read_parser.add_argument(
+        "--mdoc-issuer-role",
+        default=trust.DEFAULT_MDOC_ISSUER_ROLE,
+        help=f"Verifier-owned go-trust mdoc issuer role (default: {trust.DEFAULT_MDOC_ISSUER_ROLE})",
+    )
     read_parser.add_argument("--json", action="store_true", help="Print the DeviceResponse as JSON instead of text")
     read_parser.add_argument("--dump-cbor", metavar="DIR", help="Write engagement/request CBOR to DIR; response dumps are disabled for non-retention requests")
     read_parser.add_argument("-v", "--verbose", action="store_true", help="Log BLE transport progress")

@@ -10,6 +10,8 @@ readme = "README.md"
 license = { text = "BSD-2-Clause" }
 requires-python = ">=3.10"
 dependencies = [
+    "aiohttp>=3.10",
+    "asn1crypto>=1.5",
     "bleak>=0.21",
     "cbor2>=6.0",
     "cryptography>=42",

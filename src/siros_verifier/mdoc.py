@@ -7,9 +7,10 @@ are verified against the certificate presented in the message itself (see
 verify.py); DeviceAuth verification additionally needs session context and
 runs separately via verify_device_auth().
 
-None of this is trust evaluation: certificate chains are never validated
-against an IACA root and revocation is never checked - a "valid" signature
+None of this is trust evaluation: certificate chains are not locally validated
+against an IACA root and revocation is not locally checked - a "valid" signature
 here means "internally consistent with the presented key", not "trustworthy".
+Optional issuer authorization is delegated separately to go-trust in trust.py.
 """
 
 from __future__ import annotations
@@ -146,6 +147,7 @@ class IssuerAuthInfo:
     certificates: list[CertificateInfo] = field(default_factory=list)
     mso: MobileSecurityObject | None = None
     signature_valid: bool | None = None  # None = not attempted (no cert / unsupported alg)
+    x5chain_der: list[bytes] = field(default_factory=list, metadata={"json_exclude": True})
 
     @classmethod
     def from_cose_sign1(cls, cose_sign1: list | tuple) -> IssuerAuthInfo:
@@ -186,7 +188,12 @@ class IssuerAuthInfo:
         mso = MobileSecurityObject.from_cbor(mso_cbor) if isinstance(mso_cbor, Mapping) else None
 
         return cls(
-            alg=alg, alg_name=alg_name, certificates=certificates, mso=mso, signature_valid=signature_valid
+            alg=alg,
+            alg_name=alg_name,
+            certificates=certificates,
+            mso=mso,
+            signature_valid=signature_valid,
+            x5chain_der=der_certs,
         )
 
 
@@ -206,8 +213,8 @@ class ParsedDocument:
     device_namespaces: Mapping
     device_auth_type: str | None  # "deviceSignature" | "deviceMac" | None
     errors: Mapping
-    device_auth_cbor: Mapping = field(default_factory=dict)
-    device_namespaces_raw: bytes | None = None
+    device_auth_cbor: Mapping = field(default_factory=dict, metadata={"json_exclude": True})
+    device_namespaces_raw: bytes | None = field(default=None, metadata={"json_exclude": True})
     device_auth_valid: bool | None = None  # set by verify_device_auth(), which needs session context
 
 

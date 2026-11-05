@@ -6,8 +6,8 @@ This module checks whether a signature/MAC/digest is internally VALID given
 the key or certificate presented in the message itself. It does NOT evaluate
 trust: it never checks whether an IssuerAuth certificate chains to a trusted
 IACA root, is unrevoked, or is otherwise policy-compliant. "Valid" here means
-"consistent with the presented key", not "trustworthy" - trust evaluation
-remains out of scope for this tool.
+"consistent with the presented key", not "trustworthy". Optional trust
+evaluation is delegated to go-trust, never decided by this module.
 """
 
 from __future__ import annotations

@@ -362,3 +362,151 @@ def test_read_escapes_session_data_status(wallet_engagement, monkeypatch, capsys
     captured = capsys.readouterr()
     assert "\x1b" not in captured.err
     assert "bad\\x1b[2J" in captured.err
+
+
+def test_read_releases_claims_after_explicit_pdp_permit(wallet_engagement, monkeypatch, capsys):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
+    monkeypatch.setenv(cli.trust.PDP_BEARER_TOKEN_ENV, "test-token")
+    captured_call = {}
+
+    async def permit(documents, pdp_url, role, bearer_token):
+        captured_call.update(documents=documents, pdp_url=pdp_url, role=role, bearer_token=bearer_token)
+        assert all(doc.device_auth_valid is True for doc in documents)
+
+    monkeypatch.setattr(cli.trust, "authorize_documents", permit)
+    args = cli.build_parser().parse_args(
+        ["read", mdoc_uri, "--pdp-url", "https://pdp.example/evaluation", "--mdoc-issuer-role", "custom-role"]
+    )
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 0
+    assert captured_call["pdp_url"] == "https://pdp.example/evaluation"
+    assert captured_call["role"] == "custom-role"
+    assert captured_call["bearer_token"] == "test-token"
+    assert len(captured_call["documents"]) == 1
+    assert "given_name = 'Alice'" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_pdp_denial_releases_no_claims(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
+
+    async def deny(*args):
+        raise cli.trust.TrustDenied("test denial")
+
+    monkeypatch.setattr(cli.trust, "authorize_documents", deny)
+    argv = ["read", mdoc_uri, "--pdp-url", "https://pdp.example/evaluation"] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "test denial" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+def test_read_does_not_call_pdp_for_invalid_document(wallet_engagement, monkeypatch, capsys):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, tamper_device_signature=True))
+    pdp_called = False
+
+    async def unexpected_pdp(*args):
+        nonlocal pdp_called
+        pdp_called = True
+
+    monkeypatch.setattr(cli.trust, "authorize_documents", unexpected_pdp)
+    args = cli.build_parser().parse_args(["read", mdoc_uri, "--pdp-url", "https://pdp.example/evaluation"])
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    assert pdp_called is False
+    assert "given_name" not in capsys.readouterr().out
+
+
+def test_read_accepts_detached_device_mac_and_requests_permit(wallet_engagement, monkeypatch, capsys):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, device_auth_method="mac"))
+    pdp_called = False
+
+    async def permit(*args):
+        nonlocal pdp_called
+        pdp_called = True
+
+    monkeypatch.setattr(cli.trust, "authorize_documents", permit)
+    args = cli.build_parser().parse_args(
+        ["read", mdoc_uri, "--json", "--pdp-url", "https://pdp.example/evaluation"]
+    )
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 0
+    assert pdp_called is True
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{") :])
+    assert payload["documents"][0]["device_auth_type"] == "deviceMac"
+    assert payload["documents"][0]["device_auth_valid"] is True
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize(
+    "document_kwargs",
+    [{"replay_inline_device_auth": True}, {"tamper_device_mac": True}],
+    ids=["historical-inline", "tampered"],
+)
+def test_read_rejects_invalid_device_mac_before_pdp(wallet_engagement, monkeypatch, capsys, json_output, document_kwargs):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(
+        ble,
+        "exchange",
+        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", **document_kwargs),
+    )
+    pdp_called = False
+
+    async def unexpected_pdp(*args):
+        nonlocal pdp_called
+        pdp_called = True
+
+    monkeypatch.setattr(cli.trust, "authorize_documents", unexpected_pdp)
+    argv = ["read", mdoc_uri, "--pdp-url", "https://pdp.example/evaluation"] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    assert pdp_called is False
+    captured = capsys.readouterr()
+    assert "device_auth_not_valid" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_empty_pdp_url_releases_no_claims(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
+    argv = ["read", mdoc_uri, "--pdp-url", ""] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "HTTPS" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+def test_read_malformed_bearer_token_is_not_disclosed(wallet_engagement, monkeypatch, capsys):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
+    monkeypatch.setenv(cli.trust.PDP_BEARER_TOKEN_ENV, "bad\nSECRET-TOKEN")
+    args = cli.build_parser().parse_args(["read", mdoc_uri, "--pdp-url", "https://pdp.example/evaluation"])
+
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "invalid PDP bearer token" in captured.err
+    assert "SECRET-TOKEN" not in captured.err
+    assert "given_name" not in captured.out
