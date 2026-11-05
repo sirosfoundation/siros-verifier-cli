@@ -96,9 +96,15 @@ def test_issuer_id_ignores_unrelated_malformed_extensions():
     certificate = asn1_x509.Certificate.load(der)
     for extension in certificate["tbs_certificate"]["extensions"]:
         if extension["extn_id"].dotted == "2.5.29.19":
-            extension["extn_value"].set(b"\x30\x01\x01")
-
-    assert trust.mdoc_issuer_id(certificate.dump()) == "https://issuer.example"
+            old_value = extension["extn_value"]
+            extension["extn_value"] = old_value.__class__(b"\x30\x01\x01")
+    malformed = certificate.dump()
+    reloaded = asn1_x509.Certificate.load(malformed)
+    basic_constraints = next(
+        extension for extension in reloaded["tbs_certificate"]["extensions"] if extension["extn_id"].dotted == "2.5.29.19"
+    )
+    assert basic_constraints["extn_value"].contents == b"\x30\x01\x01"
+    assert trust.mdoc_issuer_id(malformed) == "https://issuer.example"
 
 
 def test_issuer_id_returns_first_usable_san_before_duplicate():

@@ -14,6 +14,7 @@ import unicodedata
 from urllib.parse import urlsplit
 
 import aiohttp
+from asn1crypto import core as asn1_core
 from asn1crypto import x509 as asn1_x509
 
 from siros_verifier import mdoc
@@ -49,9 +50,10 @@ def _hash_issuer_id(leaf_der: bytes) -> str:
 def mdoc_issuer_id(leaf_der: bytes) -> str:
     """Match verifier-core's ordered, SAN-only DER traversal and leaf-hash fallback."""
     try:
-        certificate = asn1_x509.Certificate.load(leaf_der, strict=True)
-        if certificate.dump(force=True) != leaf_der:
+        structural = asn1_core.Sequence.load(leaf_der, strict=True)
+        if structural.dump(force=True) != leaf_der:
             return _hash_issuer_id(leaf_der)
+        certificate = asn1_x509.Certificate.load(leaf_der, strict=True)
         extensions = certificate["tbs_certificate"]["extensions"]
     except (TypeError, ValueError):
         return _hash_issuer_id(leaf_der)
