@@ -206,6 +206,60 @@ def test_read_end_to_end_json(wallet_engagement, monkeypatch, capsys):
     assert doc["device_auth_valid"] is True
 
 
+def test_read_accepts_detached_device_mac(wallet_engagement, monkeypatch, capsys):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, device_auth_method="mac"))
+
+    args = cli.build_parser().parse_args(["read", mdoc_uri, "--json"])
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{") :])
+    assert payload["documents"][0]["device_auth_type"] == "deviceMac"
+    assert payload["documents"][0]["device_auth_valid"] is True
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_rejects_inline_historical_device_mac(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(
+        ble,
+        "exchange",
+        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", replay_inline_device_auth=True),
+    )
+
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "device_auth_not_valid" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_rejects_tampered_device_mac(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(
+        ble,
+        "exchange",
+        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", tamper_device_mac=True),
+    )
+
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "device_auth_not_valid" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
 def test_read_dump_cbor_does_not_retain_response(wallet_engagement, monkeypatch, capsys, tmp_path):
     device_priv, de_bytes, mdoc_uri = wallet_engagement
     monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
