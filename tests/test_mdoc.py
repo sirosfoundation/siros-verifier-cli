@@ -69,7 +69,7 @@ def test_build_device_request_shape():
     assert items_request_bytes.tag == 24
     items_request = cbor2.loads(items_request_bytes.value)
     assert items_request["docType"] == "org.iso.18013.5.1.mDL"
-    assert items_request["nameSpaces"]["org.iso.18013.5.1"]["given_name"] is True
+    assert items_request["nameSpaces"]["org.iso.18013.5.1"]["given_name"] is False
 
 
 def test_build_session_establishment_shape():

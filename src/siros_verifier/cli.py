@@ -161,6 +161,11 @@ def _setup_session(args: argparse.Namespace) -> SessionSetup:
     de = engagement.parse_mdoc_uri(uri)
     print_engagement(de)
     _dump_cbor(args.dump_cbor, "engagement.cbor", de.raw_bytes)
+    if args.dump_cbor:
+        print(
+            "note: SessionData/DeviceResponse dumps are disabled because requests use intentToRetain=false.",
+            file=sys.stderr,
+        )
 
     e_reader_priv = ec.generate_private_key(ec.SECP256R1())
     e_reader_key_tag = crypto.cose_key_tag(e_reader_priv.public_key())
@@ -221,7 +226,6 @@ async def run_read(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    _dump_cbor(args.dump_cbor, "session_data.cbor", result.session_data_bytes)
     session_data = cbor2.loads(result.session_data_bytes)
     if "data" not in session_data:
         status = session_data.get("status")
@@ -230,7 +234,6 @@ async def run_read(args: argparse.Namespace) -> int:
         return 1
 
     plaintext = crypto.decrypt_device_message(sk_device, 1, session_data["data"])
-    _dump_cbor(args.dump_cbor, "device_response.cbor", plaintext)
     response = mdoc.parse_device_response(plaintext)
     for doc in response.documents:
         doc.device_auth_valid = mdoc.verify_device_auth(doc, session_transcript, e_reader_priv)
@@ -298,7 +301,6 @@ async def run_fuzz(args: argparse.Namespace) -> int:
             )
             return 1
 
-        _dump_cbor(args.dump_cbor, "fuzz_session_data.cbor", result.session_data_bytes)
         session_data = cbor2.loads(result.session_data_bytes)
         if "data" not in session_data:
             status = session_data.get("status")
@@ -507,7 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     read_parser.add_argument("--response-timeout", type=float, default=15.0)
     read_parser.add_argument("--json", action="store_true", help="Print the DeviceResponse as JSON instead of text")
-    read_parser.add_argument("--dump-cbor", metavar="DIR", help="Write raw CBOR of each protocol message to DIR")
+    read_parser.add_argument("--dump-cbor", metavar="DIR", help="Write engagement/request CBOR to DIR; response dumps are disabled for non-retention requests")
     read_parser.add_argument("-v", "--verbose", action="store_true", help="Log BLE transport progress")
     read_parser.set_defaults(handler=lambda args: asyncio.run(run_read(args)))
 
@@ -566,7 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
     fuzz_parser.add_argument(
         "--delay", type=float, default=0.0, help="rapid-reconnect only: seconds to wait between cycles"
     )
-    fuzz_parser.add_argument("--dump-cbor", metavar="DIR", help="Write raw CBOR of each protocol message to DIR")
+    fuzz_parser.add_argument("--dump-cbor", metavar="DIR", help="Write engagement/request CBOR to DIR; response dumps are disabled for non-retention requests")
     fuzz_parser.add_argument("-v", "--verbose", action="store_true", help="Log BLE transport progress")
     fuzz_parser.set_defaults(handler=lambda args: asyncio.run(run_fuzz(args)))
 
