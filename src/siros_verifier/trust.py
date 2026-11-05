@@ -107,7 +107,7 @@ def mdoc_issuer_id(leaf_der: bytes) -> str:
 
             dns_name: str | None = None
             for name in san:
-                value = name.native
+                value = name.contents.decode("ascii")
                 if name.name == "uniform_resource_identifier":
                     if value.startswith("http://"):
                         return "https://" + value.removeprefix("http://")

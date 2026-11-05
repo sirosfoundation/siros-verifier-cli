@@ -90,6 +90,11 @@ def test_issuer_id_uses_first_non_wildcard_dns_san():
     assert trust.mdoc_issuer_id(der) == "https://issuer.example"
 
 
+def test_issuer_id_preserves_punycode_dns_san():
+    der = make_certificate([x509.DNSName("xn--bcher-kva.example")])
+    assert trust.mdoc_issuer_id(der) == "https://xn--bcher-kva.example"
+
+
 def test_issuer_id_ignores_unrelated_malformed_extensions():
     der = make_certificate(
         [x509.UniformResourceIdentifier("https://issuer.example")], basic_constraints=True
@@ -178,6 +183,15 @@ def test_authzen_request_matches_verifier_core_shape_and_chain_order():
 
 def test_raw_chain_is_not_added_to_display_json():
     assert "x5chain_der" not in display.to_jsonable(make_document().issuer_auth)
+
+
+def test_authentication_inputs_are_not_added_to_display_json():
+    document = make_document()
+    document.device_auth_cbor = {"unprotected": {"attacker-controlled": "value"}}
+    document.device_namespaces_raw = b"raw namespaces"
+    serialized = display.to_jsonable(document)
+    assert "device_auth_cbor" not in serialized
+    assert "device_namespaces_raw" not in serialized
 
 
 @pytest.mark.parametrize("role", ["", " pid-provider", "pid-provider ", "pid\nprovider", "pid\x80provider", "pid\x85provider", "pid\x9fprovider"])

@@ -179,8 +179,8 @@ class ParsedDocument:
     device_namespaces: dict[str, dict]
     device_auth_type: str | None  # "deviceSignature" | "deviceMac" | None
     errors: dict
-    device_auth_cbor: dict = field(default_factory=dict)
-    device_namespaces_raw: bytes | None = None
+    device_auth_cbor: dict = field(default_factory=dict, metadata={"json_exclude": True})
+    device_namespaces_raw: bytes | None = field(default=None, metadata={"json_exclude": True})
     device_auth_valid: bool | None = None  # set by verify_device_auth(), which needs session context
 
 
@@ -403,9 +403,12 @@ def validate_device_response(
                 if any(value is None for value in validity.values()):
                     errors.append(f"{prefix}: validity_info")
                 else:
+                    signed = validity["signed"]
                     valid_from = validity["validFrom"]
                     valid_until = validity["validUntil"]
-                    assert valid_from is not None and valid_until is not None
+                    assert signed is not None and valid_from is not None and valid_until is not None
+                    if current_time < signed:
+                        errors.append(f"{prefix}: signed_in_future")
                     if current_time < valid_from:
                         errors.append(f"{prefix}: not_yet_valid")
                     if current_time >= valid_until:

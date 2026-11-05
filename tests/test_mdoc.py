@@ -190,6 +190,7 @@ def test_validate_device_response_rejects_unrequested_document_type():
     [
         ("validFrom", datetime.datetime(2024, 1, 20, tzinfo=datetime.timezone.utc), "not_yet_valid"),
         ("validUntil", datetime.datetime(2024, 1, 14, tzinfo=datetime.timezone.utc), "expired"),
+        ("signed", datetime.datetime(2024, 1, 20, tzinfo=datetime.timezone.utc), "signed_in_future"),
         ("signed", None, "validity_info"),
     ],
 )
