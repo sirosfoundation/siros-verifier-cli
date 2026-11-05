@@ -54,6 +54,12 @@ def test_verify_cose_sign1_detached_payload():
     assert verify_cose_sign1(cose_sign1, key.public_key(), detached_payload=detached) is True
 
 
+def test_verify_cose_sign1_detached_payload_overrides_inline():
+    key = ec.generate_private_key(ec.SECP256R1())
+    cose_sign1 = build_cose_sign1(key, payload=b"historical payload")
+    assert verify_cose_sign1(cose_sign1, key.public_key(), detached_payload=b"fresh session payload") is False
+
+
 def test_verify_cose_sign1_raises_without_payload_or_detached():
     key = ec.generate_private_key(ec.SECP256R1())
     cose_sign1 = [cbor2.dumps({1: -7}), {}, None, b"\x00" * 64]
@@ -83,6 +89,7 @@ def test_verify_cose_mac0_valid_and_invalid():
 
     cose_mac0 = [protected, {}, payload, tag]
     assert verify_cose_mac0(cose_mac0, mac_key) is True
+    assert verify_cose_mac0(cose_mac0, mac_key, detached_payload=b"fresh session payload") is False
 
     wrong_key = b"\x22" * 32
     assert verify_cose_mac0(cose_mac0, wrong_key) is False

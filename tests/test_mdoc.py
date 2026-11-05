@@ -19,7 +19,7 @@ GIVEN_NAME_ITEM = {"digestID": 1, "random": b"\x01" * 16, "elementIdentifier": "
 
 
 def build_device_response_bytes(
-    *, with_device_signature: bool = True, tamper_signature: bool = False, tamper_digest: bool = False
+    *, with_device_signature: bool = True, tamper_signature: bool = False, tamper_digest: bool = False, status: object = 0
 ) -> bytes:
     now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -60,7 +60,7 @@ def build_device_response_bytes(
         "deviceSigned": {"nameSpaces": tagged24({}), "deviceAuth": device_auth},
     }
 
-    device_response = {"version": "1.0", "documents": [document], "status": 0}
+    device_response = {"version": "1.0", "documents": [document], "status": status}
     return cbor2.dumps(device_response)
 
 
@@ -212,3 +212,17 @@ def test_validate_device_response_enforces_envelope():
     errors = validation_errors(result)
     assert "unsupported_version" in errors
     assert "response_status_not_ok" in errors
+
+
+@pytest.mark.parametrize("status", [False, 0.0, 10])
+def test_validate_device_response_requires_integer_zero_status(status):
+    result = validatable_response(status=status)
+    assert "response_status_not_ok" in validation_errors(result)
+
+
+def test_validate_device_response_requires_status_member():
+    decoded = cbor2.loads(build_device_response_bytes())
+    del decoded["status"]
+    result = parse_device_response(cbor2.dumps(decoded))
+    result.documents[0].device_auth_valid = True
+    assert "response_status_not_ok" in validation_errors(result)

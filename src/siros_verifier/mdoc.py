@@ -7,9 +7,10 @@ are verified against the certificate presented in the message itself (see
 verify.py); DeviceAuth verification additionally needs session context and
 runs separately via verify_device_auth().
 
-None of this is trust evaluation: certificate chains are never validated
-against an IACA root and revocation is never checked - a "valid" signature
+None of this is trust evaluation: certificate chains are not locally validated
+against an IACA root and revocation is not locally checked - a "valid" signature
 here means "internally consistent with the presented key", not "trustworthy".
+Optional issuer authorization is delegated separately to go-trust in trust.py.
 """
 
 from __future__ import annotations
@@ -122,6 +123,7 @@ class IssuerAuthInfo:
     certificates: list[CertificateInfo] = field(default_factory=list)
     mso: MobileSecurityObject | None = None
     signature_valid: bool | None = None  # None = not attempted (no cert / unsupported alg)
+    x5chain_der: list[bytes] = field(default_factory=list, metadata={"json_exclude": True})
 
     @classmethod
     def from_cose_sign1(cls, cose_sign1: list) -> IssuerAuthInfo:
@@ -152,7 +154,12 @@ class IssuerAuthInfo:
         mso = MobileSecurityObject.from_cbor(mso_cbor) if isinstance(mso_cbor, dict) else None
 
         return cls(
-            alg=alg, alg_name=alg_name, certificates=certificates, mso=mso, signature_valid=signature_valid
+            alg=alg,
+            alg_name=alg_name,
+            certificates=certificates,
+            mso=mso,
+            signature_valid=signature_valid,
+            x5chain_der=der_certs,
         )
 
 
@@ -278,17 +285,19 @@ def verify_device_auth(
 
     try:
         if doc.device_auth_type == "deviceSignature":
-            return verify.verify_cose_sign1(
-                doc.device_auth_cbor["deviceSignature"], device_pub, detached_payload=detached_payload
-            )
+            structure = doc.device_auth_cbor["deviceSignature"]
+            if not isinstance(structure, list) or len(structure) != 4 or structure[2] is not None:
+                return None
+            return verify.verify_cose_sign1(structure, device_pub, detached_payload=detached_payload)
         if doc.device_auth_type == "deviceMac":
             if not isinstance(device_pub, ec.EllipticCurvePublicKey):
                 return None
+            structure = doc.device_auth_cbor["deviceMac"]
+            if not isinstance(structure, list) or len(structure) != 4 or structure[2] is not None:
+                return None
             zab = e_reader_priv.exchange(ec.ECDH(), device_pub)
             emac_key = crypto.derive_emac_key(zab, session_transcript)
-            return verify.verify_cose_mac0(
-                doc.device_auth_cbor["deviceMac"], emac_key, detached_payload=detached_payload
-            )
+            return verify.verify_cose_mac0(structure, emac_key, detached_payload=detached_payload)
     except verify.UnsupportedAlgorithm:
         return None
     return None
@@ -325,7 +334,7 @@ def validate_device_response(
     errors: list[str] = []
     if response.version != "1.0":
         errors.append("unsupported_version")
-    if response.status != 0:
+    if type(response.status) is not int or response.status != 0:
         errors.append("response_status_not_ok")
     if not response.documents:
         errors.append("document_count")

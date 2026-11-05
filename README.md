@@ -12,14 +12,14 @@ device retrieval from the terminal: drives a full device-retrieval
 transaction with nothing but the host machine's own Bluetooth adapter - no
 phone, Waydroid, Flutter, or reader app required on this side.
 
-This is a debugging and protocol-conformance tool, not a conformant mdoc
-reader application. **Trust evaluation is explicitly out of scope**:
-IssuerAuth/DeviceAuth signatures, MACs, and MSO digests are cryptographically
-verified against the key/certificate presented in the message itself, but
-certificate chains are never validated against an IACA root and revocation is
-never checked. A **VALID** result means "internally consistent with the
-presented key", never "trustworthy" - don't make trust decisions based on
-this tool's output.
+This is a debugging and protocol-conformance tool. IssuerAuth/DeviceAuth
+signatures, MACs, and MSO digests are cryptographically verified against the
+key/certificate presented in the message itself. **By default, trust evaluation
+is out of scope**: certificate chains are not locally validated against an IACA
+root and revocation is not locally checked. A **VALID** result then means only
+"internally consistent with the presented key". With `--pdp-url`, trust is
+instead delegated to go-trust and every document requires an explicit permit
+before claims are displayed; there is no local trust fallback.
 
 Compare with [siros-verifier-app](https://github.com/sirosfoundation/siros-verifier-app)
 (a native Flutter verifier with the same protocol core, for on-device use) -
@@ -42,7 +42,8 @@ Return SessionData       ─────────────▶  Decrypt & v
 3. **Session keys** - derive `SKReader`/`SKDevice` via HKDF-SHA256 over the `SessionTranscript`
 4. **BLE transport** - either scan for the peripheral-server-mode UUID and connect as GATT central, or advertise the central-client-mode UUID as a GATT peripheral and wait for the mdoc to connect - whichever the engagement offers
 5. **Request** - encrypt a `DeviceRequest` (AES-256-GCM) for one or more docType/namespace/claims
-6. **Response** - decrypt the `DeviceResponse`; verify `IssuerAuth` (COSE_Sign1), per-element MSO digests, `DeviceAuth` (COSE_Sign1/COSE_Mac0), MSO validity, and the requested document/claims; display claims only when every check passes
+6. **Response** - decrypt the `DeviceResponse`; verify `IssuerAuth` (COSE_Sign1), per-element MSO digests, `DeviceAuth` (COSE_Sign1/COSE_Mac0), MSO validity, and the requested document/claims
+7. **Authorization (optional)** - with `--pdp-url`, send each verified document's issuer evidence to go-trust and require an explicit permit; display claims only when local verification and every PDP decision pass
 
 In central client mode the transport is reversed - this tool advertises and
 serves a GATT service (Table 6: `State`/`Client2Server`/`Server2Client`, plus
@@ -119,7 +120,22 @@ Other useful flags:
 - `--dump-cbor DIR` - write engagement and request-side CBOR (engagement, DeviceRequest, SessionEstablishment) to `DIR`, for offline analysis. SessionData/DeviceResponse dumps are disabled because elements are requested with `intentToRetain=false`; retaining them would contradict the holder's consent.
 - `--nfc-handover-hex HEX` / `--nfc-handover-file FILE` - if engagement happened via NFC static handover instead of QR
 - `--advertise-timeout SECONDS` - mdoc central client mode only: how long to advertise while waiting for the mdoc to connect (default 30s; requires the `peripheral` extra)
+- `--pdp-url URL` - full go-trust AuthZEN evaluation endpoint; require an explicit permit for every verified document before disclosure
+- `--mdoc-issuer-role ROLE` - verifier-owned issuer role sent as `action.name` (default `pid-provider`)
 - `-v` - log BLE transport progress (scan/advertise, connect, MTU, chunking)
+
+### go-trust authorization
+
+Use the complete evaluation URL; the CLI does not perform discovery or append a path. HTTPS is required except for exact loopback hosts during local testing. If the PDP needs a bearer token, provide it through the environment rather than on the command line:
+
+```bash
+export SIROS_PDP_BEARER_TOKEN='...'
+siros-verify read 'mdoc:AAAA...' \
+    --pdp-url 'https://pdp.example/evaluation' \
+    --mdoc-issuer-role pid-provider
+```
+
+The CLI sends one verifier-core-compatible AuthZEN request per cryptographically verified document, preserving the exact leaf-first DER chain in `resource.key`. It requires an actual JSON boolean `"decision": true` for every document. Explicit denial, HTTP errors, redirects, timeouts, malformed or oversized responses, and unavailable PDPs all fail the complete presentation without printing claims. No permit is cached.
 
 Inspect a `DeviceEngagement` offline, without connecting to anything (also supports `--qr-image`/`--qr-camera`):
 
@@ -146,11 +162,12 @@ echo 'some text' | siros-verify qr show     # also reads from stdin
 - ✅ DeviceAuth (`deviceSignature`/`deviceMac`) - verified against the MSO's `deviceKey` (needs the reader's own ephemeral key + SessionTranscript, so this runs after parsing)
 - ✅ MSO validity period and document/MSO docType consistency - enforced before disclosure
 - ✅ Request policy - every requested document type, namespace, and element is required; unrequested document types are rejected; extra valid claims are allowed
-- ✅ Fail-closed disclosure - any response-status, cryptographic, validity, or request-policy failure exits nonzero without printing claims
+- ✅ Fail-closed disclosure - any response-status, cryptographic, validity, request-policy, or configured PDP failure exits nonzero without printing claims
+- ✅ Optional go-trust authorization - one AuthZEN evaluation per verified document, with an explicit permit required for every document
 - ✅ Per-document and per-element error codes (Table 8/9/15/20 of ISO 18013-5)
 - ✅ Both BLE retrieval methods (mdoc peripheral server mode via `bleak`, mdoc central client mode via `bless`) - central client mode is protocol-complete but **UNVERIFIED ON REAL HARDWARE**
-- ❌ Certificate chain / IACA trust anchor validation - **not done, ever**
-- ❌ Revocation checking - **not done, ever**
+- ❌ Local certificate chain / IACA trust anchor validation - not performed by the CLI; deploy a configured go-trust PDP for issuer trust decisions
+- ❌ Local revocation checking - not performed by the CLI; deploy a configured go-trust PDP for revocation policy
 
 ## Stress-testing / fuzzing
 
