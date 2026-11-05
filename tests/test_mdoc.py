@@ -26,6 +26,7 @@ def build_device_response_bytes(
     tamper_digest: bool = False,
     status: object = 0,
     issuer_items: list | None = None,
+    bignum_value_digest_keys: bool = False,
 ) -> bytes:
     now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -36,12 +37,13 @@ def build_device_response_bytes(
         if not isinstance(item_value, dict):
             continue
         digest_id = item_value.get("digestID")
-        if type(digest_id) is not int:
+        if type(digest_id) is not int and not isinstance(digest_id, cbor2.CBORTag):
             continue
         tagged_item = item if isinstance(item, cbor2.CBORTag) else tagged24(item_value)
         correct_digest = hashes.Hash(hashes.SHA256())
         correct_digest.update(cbor2.dumps(tagged_item))
-        value_digests[digest_id] = correct_digest.finalize() if not tamper_digest else b"\x00" * 32
+        digest_key = cbor2.CBORTag(2, b"\x01") if bignum_value_digest_keys else digest_id
+        value_digests[digest_key] = correct_digest.finalize() if not tamper_digest else b"\x00" * 32
 
     device_key_priv = ec.generate_private_key(ec.SECP256R1())
 
@@ -282,15 +284,21 @@ def test_parse_rejects_duplicate_element_identifier_with_valid_digests():
         [tagged24(dict(GIVEN_NAME_ITEM, random=b""))],
         [tagged24(dict(GIVEN_NAME_ITEM, digestID=True))],
         [tagged24(dict(GIVEN_NAME_ITEM, digestID=[]))],
+        [tagged24(dict(GIVEN_NAME_ITEM, digestID=cbor2.CBORTag(2, b"\x01")))],
         [tagged24(dict(GIVEN_NAME_ITEM, elementIdentifier=1))],
         [tagged24({"digestID": 1, "random": b"\x01" * 16, "elementIdentifier": "given_name"})],
         [cbor2.CBORTag(24, cbor2.dumps(GIVEN_NAME_ITEM) + b"\x00")],
     ],
-    ids=["bare-map", "empty-random", "bool-digest-id", "list-digest-id", "integer-identifier", "missing-value", "trailing-tag-data"],
+    ids=["bare-map", "empty-random", "bool-digest-id", "list-digest-id", "bignum-digest-id", "integer-identifier", "missing-value", "trailing-tag-data"],
 )
 def test_parse_rejects_malformed_issuer_items(items):
     with pytest.raises(MdocStructureError):
         parse_device_response(build_device_response_bytes(issuer_items=items))
+
+
+def test_parse_rejects_bignum_value_digest_key():
+    with pytest.raises(MdocStructureError):
+        parse_device_response(build_device_response_bytes(bignum_value_digest_keys=True))
 
 
 @pytest.mark.parametrize(

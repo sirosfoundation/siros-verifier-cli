@@ -69,12 +69,23 @@ def build_session_establishment(e_reader_key_tag: cbor2.CBORTag, encrypted_devic
     return cbor2.dumps({"eReaderKey": e_reader_key_tag, "data": encrypted_device_request})
 
 
+def _preserve_bignum_tag(tag: int):
+    def decode(value: bytes, _immutable: bool) -> cbor2.CBORTag:
+        integer = int.from_bytes(value, "big")
+        return cbor2.CBORTag(tag, integer if tag == 2 else -1 - integer)
+
+    return decode
+
+
+_BIGNUM_DECODERS = {2: _preserve_bignum_tag(2), 3: _preserve_bignum_tag(3)}
+
+
 def _unwrap_tagged24(value):
     """Decode exactly one CBOR item from a required tag-24 byte string."""
     if not isinstance(value, cbor2.CBORTag) or value.tag != 24 or not isinstance(value.value, bytes):
         raise MdocStructureError("expected tag-24 encoded bytes")
     stream = io.BytesIO(value.value)
-    decoded = cbor2.CBORDecoder(stream).decode()
+    decoded = cbor2.CBORDecoder(stream, semantic_decoders=_BIGNUM_DECODERS).decode()
     if stream.tell() != len(value.value):
         raise MdocStructureError("trailing data in tag-24 encoded bytes")
     return decoded
