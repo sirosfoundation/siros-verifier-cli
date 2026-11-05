@@ -223,6 +223,7 @@ def test_read_end_to_end_rejects_invalid_device_auth(wallet_engagement, monkeypa
     [
         ({"device_namespaces": {"org.iso.18013.5.1": {"device_claim": "value"}}}, "device_namespaces_unsupported"),
         ({"errors": {"org.iso.18013.5.1": {"other": []}}}, "invalid_errors"),
+        ({"errors": {"org.iso.18013.5.1": {"other": 1 << 20000}}}, "invalid_errors"),
     ],
 )
 def test_read_rejects_unsafe_response_content(

@@ -233,7 +233,7 @@ def test_validate_device_response_rejects_malformed_element_errors(errors):
     assert any("invalid_errors" in error for error in validation_errors(result))
 
 
-@pytest.mark.parametrize("errors", [{}, [{"doc": False}], [{"doc": []}]])
+@pytest.mark.parametrize("errors", [{}, [{"doc": False}], [{"doc": []}], [{"doc": 1 << 20000}]])
 def test_validate_device_response_rejects_malformed_document_errors(errors):
     result = validatable_response()
     result.document_errors = errors
