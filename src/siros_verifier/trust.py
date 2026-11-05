@@ -49,7 +49,9 @@ def _hash_issuer_id(leaf_der: bytes) -> str:
 def mdoc_issuer_id(leaf_der: bytes) -> str:
     """Match verifier-core's ordered, SAN-only DER traversal and leaf-hash fallback."""
     try:
-        certificate = asn1_x509.Certificate.load(leaf_der)
+        certificate = asn1_x509.Certificate.load(leaf_der, strict=True)
+        if certificate.dump(force=True) != leaf_der:
+            return _hash_issuer_id(leaf_der)
         extensions = certificate["tbs_certificate"]["extensions"]
     except (TypeError, ValueError):
         return _hash_issuer_id(leaf_der)
@@ -58,20 +60,23 @@ def mdoc_issuer_id(leaf_der: bytes) -> str:
         if extension["extn_id"].dotted != "2.5.29.17":
             continue
         try:
-            san = asn1_x509.GeneralNames.load(extension["extn_value"].contents)
+            san_der = extension["extn_value"].contents
+            san = asn1_x509.GeneralNames.load(san_der, strict=True)
+            if san.dump(force=True) != san_der:
+                return _hash_issuer_id(leaf_der)
+
+            dns_name: str | None = None
+            for name in san:
+                value = name.native
+                if name.name == "uniform_resource_identifier":
+                    if value.startswith("http://"):
+                        return "https://" + value.removeprefix("http://")
+                    if value.startswith("https://"):
+                        return value
+                elif name.name == "dns_name" and dns_name is None and not value.startswith("*."):
+                    dns_name = value
         except (TypeError, ValueError):
             return _hash_issuer_id(leaf_der)
-
-        dns_name: str | None = None
-        for name in san:
-            if name.name == "uniform_resource_identifier":
-                value = name.native
-                if value.startswith("http://"):
-                    return "https://" + value.removeprefix("http://")
-                if value.startswith("https://"):
-                    return value
-            elif name.name == "dns_name" and dns_name is None and not name.native.startswith("*."):
-                dns_name = name.native
         if dns_name is not None:
             return f"https://{dns_name}"
     return _hash_issuer_id(leaf_der)

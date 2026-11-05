@@ -58,6 +58,20 @@ def evaluate(payload, url, token=None):
     return asyncio.run(trust.evaluate_request(payload, url, token))
 
 
+def rewrite_san(der, rewrite):
+    certificate = asn1_x509.Certificate.load(der)
+    for extension in certificate["tbs_certificate"]["extensions"]:
+        if extension["extn_id"].dotted == "2.5.29.17":
+            old_value = extension["extn_value"]
+            extension["extn_value"] = old_value.__class__(rewrite(old_value.contents))
+    return certificate.dump()
+
+
+def expected_hash_identity(der):
+    digest = base64.urlsafe_b64encode(hashlib.sha256(der).digest()).rstrip(b"=").decode()
+    return f"x509_hash:{digest}"
+
+
 def test_issuer_id_prefers_uri_san_over_dns():
     der = make_certificate(
         [x509.DNSName("dns.example"), x509.UniformResourceIdentifier("https://issuer.example/path")]
@@ -94,6 +108,35 @@ def test_issuer_id_returns_first_usable_san_before_duplicate():
     certificate["tbs_certificate"]["extensions"].append(san.copy())
 
     assert trust.mdoc_issuer_id(certificate.dump()) == "https://issuer.example"
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        lambda san: san + b"\x00",
+        lambda san: b"\x30\x80" + san[2:] + b"\x00\x00",
+        lambda san: b"\x30\x81" + san[1:],
+    ],
+    ids=["trailing-data", "indefinite-length", "non-minimal-length"],
+)
+def test_issuer_id_rejects_non_der_san(rewrite):
+    der = make_certificate([x509.UniformResourceIdentifier("https://issuer.example")])
+    malformed = rewrite_san(der, rewrite)
+    assert trust.mdoc_issuer_id(malformed) == expected_hash_identity(malformed)
+
+
+@pytest.mark.parametrize(
+    ("general_name", "ascii_value"),
+    [
+        (x509.UniformResourceIdentifier("https://issuer.example"), b"https://issuer.example"),
+        (x509.DNSName("issuer.example"), b"issuer.example"),
+    ],
+    ids=["uri", "dns"],
+)
+def test_issuer_id_rejects_non_ia5_san_values(general_name, ascii_value):
+    der = make_certificate([general_name])
+    malformed = rewrite_san(der, lambda san: san.replace(ascii_value, ascii_value[:-1] + b"\xff"))
+    assert trust.mdoc_issuer_id(malformed) == expected_hash_identity(malformed)
 
 
 def test_issuer_id_hashes_exact_leaf_when_no_usable_san():
