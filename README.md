@@ -67,12 +67,11 @@ via `bless`, requires the `peripheral` extra). Session crypto, request
 building, and response verification are identical either way - only the
 transport differs.
 
-**Central client mode is UNVERIFIED ON REAL HARDWARE.** It's the mirror
-image of `siros-sdk-kotlin`'s `BleCentralClient.kt`, itself unverified for
-the same reason: until this tool exists, there was nothing to test either
-side against. Both halves are implemented against the spec and against each
-other's expected wire behavior, but have not yet been run against real
-hardware together - test carefully before relying on this mode.
+Both BLE roles have been exercised on a physical Pixel 10a against the GDC
+wallet, using a fresh QR engagement, one mDL, and one request/response round
+trip in each direction. The live go-trust permit and fail-closed 404 paths
+were also exercised. See [Physical interoperability evidence](docs/INTEROPERABILITY.md)
+for the exact setup, commands, results, and remaining NFC boundary.
 
 ## Install
 
@@ -166,7 +165,7 @@ echo 'some text' | siros-verify qr show     # also reads from stdin
 - ✅ Fail-closed disclosure - any response-status, cryptographic, validity, request-policy, response-structure, or configured PDP failure exits nonzero without printing claims
 - ✅ Optional go-trust authorization - one AuthZEN evaluation per verified document, with an explicit permit required for every document
 - ✅ Per-document and per-element error codes (Table 8/9/15/20 of ISO 18013-5)
-- ✅ Both BLE retrieval methods (mdoc peripheral server mode via `bleak`, mdoc central client mode via `bless`) - central client mode is protocol-complete but **UNVERIFIED ON REAL HARDWARE**
+- ✅ Both BLE retrieval methods (mdoc peripheral server mode via `bleak`, mdoc central client mode via `bless`) - [both roles exercised on physical hardware](docs/INTEROPERABILITY.md)
 - ❌ Local certificate chain / IACA trust anchor validation - not performed by the CLI; deploy a configured go-trust PDP for issuer trust decisions
 - ❌ Local revocation checking - not performed by the CLI; deploy a configured go-trust PDP for revocation policy
 
