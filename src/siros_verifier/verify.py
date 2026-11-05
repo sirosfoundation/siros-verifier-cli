@@ -12,6 +12,7 @@ remains out of scope for this tool.
 
 from __future__ import annotations
 
+import io
 from collections.abc import Mapping
 
 import cbor2
@@ -48,11 +49,31 @@ def _sig_structure(context: str, protected_bytes: bytes, payload: bytes, externa
     return cbor2.dumps([context, protected_bytes, external_aad, payload])
 
 
+def _preserve_bignum_tag(tag: int):
+    def decode(value: bytes, _immutable: bool) -> cbor2.CBORTag:
+        integer = int.from_bytes(value, "big")
+        return cbor2.CBORTag(tag, integer if tag == 2 else -1 - integer)
+
+    return decode
+
+
+_BIGNUM_DECODERS = {2: _preserve_bignum_tag(2), 3: _preserve_bignum_tag(3)}
+
+
+def decode_cbor_item(data: bytes) -> tuple[object, int]:
+    """Decode one item while preserving tag 2/3 identity, returning bytes consumed."""
+    stream = io.BytesIO(data)
+    decoded = cbor2.CBORDecoder(stream, semantic_decoders=_BIGNUM_DECODERS).decode(immutable=False)
+    return decoded, stream.tell()
+
+
 def _cose_alg(cose_struct: list | tuple) -> int:
     protected_bytes, unprotected = cose_struct[0], cose_struct[1]
     if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, Mapping):
         raise UnsupportedAlgorithm("invalid COSE header types")
-    protected = cbor2.loads(protected_bytes) if protected_bytes else {}
+    protected, consumed = decode_cbor_item(protected_bytes) if protected_bytes else ({}, 0)
+    if consumed != len(protected_bytes):
+        raise UnsupportedAlgorithm("trailing data in COSE protected header")
     if not isinstance(protected, Mapping):
         raise UnsupportedAlgorithm("invalid COSE protected header")
     alg = protected.get(1, unprotected.get(1))

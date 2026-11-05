@@ -14,7 +14,6 @@ here means "internally consistent with the presented key", not "trustworthy".
 
 from __future__ import annotations
 
-import io
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -69,21 +68,9 @@ def build_session_establishment(e_reader_key_tag: cbor2.CBORTag, encrypted_devic
     return cbor2.dumps({"eReaderKey": e_reader_key_tag, "data": encrypted_device_request})
 
 
-def _preserve_bignum_tag(tag: int):
-    def decode(value: bytes, _immutable: bool) -> cbor2.CBORTag:
-        integer = int.from_bytes(value, "big")
-        return cbor2.CBORTag(tag, integer if tag == 2 else -1 - integer)
-
-    return decode
-
-
-_BIGNUM_DECODERS = {2: _preserve_bignum_tag(2), 3: _preserve_bignum_tag(3)}
-
-
 def _loads(data: bytes):
-    stream = io.BytesIO(data)
-    decoded = cbor2.CBORDecoder(stream, semantic_decoders=_BIGNUM_DECODERS).decode(immutable=False)
-    if stream.tell() != len(data):
+    decoded, consumed = verify.decode_cbor_item(data)
+    if consumed != len(data):
         raise MdocStructureError("trailing CBOR data")
     return decoded
 
