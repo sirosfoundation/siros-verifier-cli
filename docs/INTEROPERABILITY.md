@@ -43,4 +43,8 @@ NFC static handover was active on the holder but was not exercised. The Python C
 
 ## Android 16 KB observation
 
-Android displayed a debug-app 16 KB page-size compatibility warning. The app ran after dismissing it. Inspection found the SIROS-owned arm64/x86_64 native libraries, including `libnymauth_native.so` and `libsiros_verifier_core_ffi.so`, structurally compatible. The complete sample app was not yet clean because third-party JNA, zstd-jni, and some AndroidX binaries failed checks. Final packaging still requires dependency upgrades and full APK/AAB structural and runtime validation.
+Android initially displayed a debug-app 16 KB page-size compatibility warning. The app ran after dismissing it. A later full APK/AAB inventory found that only the x86_64 JNA 5.14.0 and zstd-jni 1.5.6-6 libraries were below 16 KB `LOAD` alignment; the arm64/x86_64 AndroidX and SIROS-owned libraries all passed.
+
+With JNA 5.19.1 and zstd-jni 1.5.7-12, the debug APK, release APK, and release AAB each passed checks of all 26 arm64/x86_64 native libraries with zero failures. The APKs also passed 16 KB ZIP data-offset and `zipalign -P 16` checks. Bundletool 1.18.3 produced a universal APK from the release AAB, and that APK passed the same 26-library ELF, ZIP-offset, and `zipalign` checks with zero failures. zstd-jni 1.5.7-12 is the newest aligned release compatible with the app's compile SDK 36; 1.5.7-13 and later require compile SDK 37.
+
+On the Pixel 10a, Android 17 in 4 KB page mode (`getconf PAGE_SIZE` = 4096), both `LongfellowZkVectorTest` tests passed, including real zstd decompression and UniFFI/JNA proof generation. This is native runtime evidence on the physical device, not a test in 16 KB page mode. A separate 16 KB device or supported 16 KB configuration is still required before claiming runtime evidence in that mode.
