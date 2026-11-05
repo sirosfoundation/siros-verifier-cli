@@ -57,6 +57,17 @@ def test_compound_bignum_map_keys_render_in_text_and_json(tag):
     assert "0x" in json_text
 
 
+def test_json_preserves_original_string_keys():
+    key = "claim\n\x1b[2J"
+
+    jsonable = display.to_jsonable({key: "value"})
+    json_text = display.to_json({key: "value"})
+
+    assert key in jsonable
+    assert "\\n" in json_text
+    assert "\\u001b" in json_text
+
+
 def test_late_rendering_failure_emits_no_partial_claims(capsys):
     class FailingRepr:
         def __repr__(self):
