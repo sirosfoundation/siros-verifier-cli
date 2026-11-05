@@ -220,7 +220,7 @@ def test_validate_device_response_enforces_envelope():
     assert "response_status_not_ok" in errors
 
 
-@pytest.mark.parametrize("status", [False, 0.0, 10])
+@pytest.mark.parametrize("status", [False, 0.0, 10, [], {}])
 def test_validate_device_response_requires_integer_zero_status(status):
     result = validatable_response(status=status)
     assert "response_status_not_ok" in validation_errors(result)
