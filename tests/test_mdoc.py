@@ -8,6 +8,7 @@ from helpers import cose_key_from_public_key, make_self_signed_cert_der, sign_es
 
 from siros_verifier.mdoc import (
     DocRequest,
+    MdocStructureError,
     ParsedElement,
     build_device_request,
     build_session_establishment,
@@ -19,21 +20,35 @@ GIVEN_NAME_ITEM = {"digestID": 1, "random": b"\x01" * 16, "elementIdentifier": "
 
 
 def build_device_response_bytes(
-    *, with_device_signature: bool = True, tamper_signature: bool = False, tamper_digest: bool = False, status: object = 0
+    *,
+    with_device_signature: bool = True,
+    tamper_signature: bool = False,
+    tamper_digest: bool = False,
+    status: object = 0,
+    issuer_items: list | None = None,
 ) -> bytes:
     now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
-    issuer_signed_item = tagged24(GIVEN_NAME_ITEM)
-    correct_digest = hashes.Hash(hashes.SHA256())
-    correct_digest.update(cbor2.dumps(issuer_signed_item))
-    digest = correct_digest.finalize() if not tamper_digest else b"\x00" * 32
+    issuer_signed_items = issuer_items if issuer_items is not None else [tagged24(GIVEN_NAME_ITEM)]
+    value_digests = {}
+    for item in issuer_signed_items:
+        item_value = cbor2.loads(item.value) if isinstance(item, cbor2.CBORTag) else item
+        if not isinstance(item_value, dict):
+            continue
+        digest_id = item_value.get("digestID")
+        if type(digest_id) is not int:
+            continue
+        tagged_item = item if isinstance(item, cbor2.CBORTag) else tagged24(item_value)
+        correct_digest = hashes.Hash(hashes.SHA256())
+        correct_digest.update(cbor2.dumps(tagged_item))
+        value_digests[digest_id] = correct_digest.finalize() if not tamper_digest else b"\x00" * 32
 
     device_key_priv = ec.generate_private_key(ec.SECP256R1())
 
     mso = {
         "version": "1.0",
         "digestAlgorithm": "SHA-256",
-        "valueDigests": {"org.iso.18013.5.1": {1: digest}},
+        "valueDigests": {"org.iso.18013.5.1": value_digests},
         "deviceKeyInfo": {"deviceKey": cose_key_from_public_key(device_key_priv.public_key())},
         "docType": "org.iso.18013.5.1.mDL",
         "validityInfo": {"signed": now, "validFrom": now, "validUntil": now + datetime.timedelta(days=30)},
@@ -54,7 +69,7 @@ def build_device_response_bytes(
     document = {
         "docType": "org.iso.18013.5.1.mDL",
         "issuerSigned": {
-            "nameSpaces": {"org.iso.18013.5.1": [issuer_signed_item]},
+            "nameSpaces": {"org.iso.18013.5.1": issuer_signed_items},
             "issuerAuth": issuer_auth,
         },
         "deviceSigned": {"nameSpaces": tagged24({}), "deviceAuth": device_auth},
@@ -247,3 +262,48 @@ def test_validate_device_response_requires_status_member():
     result = parse_device_response(cbor2.dumps(decoded))
     result.documents[0].device_auth_valid = True
     assert "response_status_not_ok" in validation_errors(result)
+
+
+def test_parse_rejects_duplicate_digest_id_with_valid_digests():
+    with pytest.raises(MdocStructureError, match="duplicate_digest_id"):
+        parse_device_response(build_device_response_bytes(issuer_items=[tagged24(GIVEN_NAME_ITEM), tagged24(GIVEN_NAME_ITEM)]))
+
+
+def test_parse_rejects_duplicate_element_identifier_with_valid_digests():
+    other = dict(GIVEN_NAME_ITEM, digestID=2, elementValue="Mallory")
+    with pytest.raises(MdocStructureError, match="duplicate_element"):
+        parse_device_response(build_device_response_bytes(issuer_items=[tagged24(GIVEN_NAME_ITEM), tagged24(other)]))
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [GIVEN_NAME_ITEM],
+        [tagged24(dict(GIVEN_NAME_ITEM, random=b""))],
+        [tagged24(dict(GIVEN_NAME_ITEM, digestID=True))],
+        [tagged24(dict(GIVEN_NAME_ITEM, digestID=[]))],
+        [tagged24(dict(GIVEN_NAME_ITEM, elementIdentifier=1))],
+        [tagged24({"digestID": 1, "random": b"\x01" * 16, "elementIdentifier": "given_name"})],
+        [cbor2.CBORTag(24, cbor2.dumps(GIVEN_NAME_ITEM) + b"\x00")],
+    ],
+    ids=["bare-map", "empty-random", "bool-digest-id", "list-digest-id", "integer-identifier", "missing-value", "trailing-tag-data"],
+)
+def test_parse_rejects_malformed_issuer_items(items):
+    with pytest.raises(MdocStructureError):
+        parse_device_response(build_device_response_bytes(issuer_items=items))
+
+
+@pytest.mark.parametrize(
+    "name_spaces",
+    [
+        {1: []},
+        {"org.iso.18013.5.1": {}},
+        {"org.iso.18013.5.1": [], "other": []},
+    ],
+    ids=["integer-namespace", "map-instead-of-array", "namespace-absent-from-value-digests"],
+)
+def test_parse_rejects_malformed_namespaces(name_spaces):
+    decoded = cbor2.loads(build_device_response_bytes())
+    decoded["documents"][0]["issuerSigned"]["nameSpaces"] = name_spaces
+    with pytest.raises(MdocStructureError):
+        parse_device_response(cbor2.dumps(decoded))

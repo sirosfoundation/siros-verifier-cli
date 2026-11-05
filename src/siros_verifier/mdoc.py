@@ -14,6 +14,7 @@ here means "internally consistent with the presented key", not "trustworthy".
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -44,6 +45,10 @@ COSE_ALG_NAMES = {
 }
 
 
+class MdocStructureError(ValueError):
+    """The DeviceResponse violates a required CBOR or mdoc container shape."""
+
+
 @dataclass
 class DocRequest:
     doc_type: str
@@ -64,12 +69,14 @@ def build_session_establishment(e_reader_key_tag: cbor2.CBORTag, encrypted_devic
 
 
 def _unwrap_tagged24(value):
-    """cbor2 decodes tag 24 as a CBORTag whose .value is the raw inner bytes -
-    unwrap and decode it. Falls through unchanged if not a tag-24 wrapper
-    (some encoders skip the outer wrapping)."""
-    if isinstance(value, cbor2.CBORTag) and value.tag == 24:
-        return cbor2.loads(value.value)
-    return value
+    """Decode exactly one CBOR item from a required tag-24 byte string."""
+    if not isinstance(value, cbor2.CBORTag) or value.tag != 24 or not isinstance(value.value, bytes):
+        raise MdocStructureError("expected tag-24 encoded bytes")
+    stream = io.BytesIO(value.value)
+    decoded = cbor2.CBORDecoder(stream).decode()
+    if stream.tell() != len(value.value):
+        raise MdocStructureError("trailing data in tag-24 encoded bytes")
+    return decoded
 
 
 @dataclass
@@ -105,12 +112,20 @@ class MobileSecurityObject:
 
     @classmethod
     def from_cbor(cls, mso: dict) -> MobileSecurityObject:
+        if not isinstance(mso, dict):
+            raise MdocStructureError("MSO must be a map")
+        value_digests = mso.get("valueDigests", {})
+        if not isinstance(value_digests, dict):
+            raise MdocStructureError("MSO valueDigests must be a map")
+        device_key_info = mso.get("deviceKeyInfo") or {}
+        if not isinstance(device_key_info, dict):
+            raise MdocStructureError("MSO deviceKeyInfo must be a map")
         return cls(
             version=mso.get("version"),
             digest_algorithm=mso.get("digestAlgorithm"),
             doc_type=mso.get("docType"),
-            value_digests=mso.get("valueDigests", {}),
-            device_key=(mso.get("deviceKeyInfo") or {}).get("deviceKey"),
+            value_digests=value_digests,
+            device_key=device_key_info.get("deviceKey"),
             validity_info=mso.get("validityInfo", {}),
         )
 
@@ -125,10 +140,18 @@ class IssuerAuthInfo:
 
     @classmethod
     def from_cose_sign1(cls, cose_sign1: list) -> IssuerAuthInfo:
-        protected_bytes, unprotected, payload, _signature = cose_sign1
+        if not isinstance(cose_sign1, list) or len(cose_sign1) != 4:
+            raise MdocStructureError("IssuerAuth must be a four-element COSE_Sign1 array")
+        protected_bytes, unprotected, payload, signature = cose_sign1
+        if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, dict):
+            raise MdocStructureError("invalid IssuerAuth COSE headers")
+        if not isinstance(payload, bytes) or not isinstance(signature, bytes):
+            raise MdocStructureError("invalid IssuerAuth COSE payload or signature")
         protected = cbor2.loads(protected_bytes) if protected_bytes else {}
         alg = protected.get(1, unprotected.get(1))
-        alg_name = COSE_ALG_NAMES.get(alg, f"unknown({alg})" if alg is not None else "none")
+        if alg is not None and type(alg) is not int:
+            raise MdocStructureError("COSE algorithm must be an integer")
+        alg_name = COSE_ALG_NAMES.get(alg, f"unknown({alg})") if alg is not None else "none"
 
         x5chain = unprotected.get(33)
         der_certs: list[bytes]
@@ -138,6 +161,8 @@ class IssuerAuthInfo:
             der_certs = [x5chain]
         else:
             der_certs = list(x5chain)
+        if any(not isinstance(der, bytes) for der in der_certs):
+            raise MdocStructureError("IssuerAuth x5chain entries must be bytes")
         certificates = [CertificateInfo.from_der(der) for der in der_certs]
 
         signature_valid = None
@@ -189,26 +214,63 @@ class DeviceResponseResult:
 def _parse_issuer_signed_namespaces(
     name_spaces_cbor: dict, mso: MobileSecurityObject | None
 ) -> dict[str, list[ParsedElement]]:
+    if not isinstance(name_spaces_cbor, dict):
+        raise MdocStructureError("issuerSigned nameSpaces must be a map")
+    if mso is None:
+        raise MdocStructureError("issuerSigned content requires an MSO")
+
     namespaces: dict[str, list[ParsedElement]] = {}
     for ns, tagged_items in name_spaces_cbor.items():
+        if not isinstance(ns, str):
+            raise MdocStructureError("issuer namespace must be text")
+        if not isinstance(tagged_items, list):
+            raise MdocStructureError(f"issuer namespace {ns!r} must contain an array")
+        digests = mso.value_digests.get(ns)
+        if not isinstance(digests, dict):
+            raise MdocStructureError(f"issuer namespace {ns!r} is absent from valueDigests")
+        for digest_id, expected_digest in digests.items():
+            if type(digest_id) is not int or not isinstance(expected_digest, bytes):
+                raise MdocStructureError(f"invalid valueDigests entry for namespace {ns!r}")
+
         elements = []
+        seen_digest_ids: set[int] = set()
+        seen_identifiers: set[str] = set()
         for tagged_item in tagged_items:
             item = _unwrap_tagged24(tagged_item)
+            if not isinstance(item, dict):
+                raise MdocStructureError("IssuerSignedItem must be a map")
             digest_id = item.get("digestID")
+            if type(digest_id) is not int or not -(1 << 64) <= digest_id < (1 << 64):
+                raise MdocStructureError("IssuerSignedItem digestID must be an ordinary integer")
+            if digest_id in seen_digest_ids:
+                raise MdocStructureError("duplicate_digest_id")
+            seen_digest_ids.add(digest_id)
 
+            random = item.get("random")
+            if not isinstance(random, bytes) or len(random) < 16:
+                raise MdocStructureError("IssuerSignedItem random must contain at least 16 bytes")
+            identifier = item.get("elementIdentifier")
+            if not isinstance(identifier, str):
+                raise MdocStructureError("IssuerSignedItem elementIdentifier must be text")
+            if identifier in seen_identifiers:
+                raise MdocStructureError("duplicate_element")
+            seen_identifiers.add(identifier)
+            if "elementValue" not in item:
+                raise MdocStructureError("IssuerSignedItem is missing elementValue")
+
+            expected_digest = digests.get(digest_id)
+            if expected_digest is None:
+                raise MdocStructureError("digest_id_not_in_mso")
             digest_valid = None
-            expected_digest = (mso.value_digests.get(ns, {}) if mso else {}).get(digest_id)
-            if mso is not None and mso.digest_algorithm is not None and expected_digest is not None:
+            if mso.digest_algorithm is not None:
                 try:
-                    digest_valid = verify.verify_digest(
-                        mso.digest_algorithm, cbor2.dumps(tagged_item), expected_digest
-                    )
+                    digest_valid = verify.verify_digest(mso.digest_algorithm, cbor2.dumps(tagged_item), expected_digest)
                 except verify.UnsupportedAlgorithm:
                     digest_valid = None
 
             elements.append(
                 ParsedElement(
-                    identifier=item["elementIdentifier"],
+                    identifier=identifier,
                     value=item["elementValue"],
                     digest_id=digest_id,
                     digest_valid=digest_valid,
@@ -219,7 +281,11 @@ def _parse_issuer_signed_namespaces(
 
 
 def _parse_document(doc: dict) -> ParsedDocument:
+    if not isinstance(doc, dict) or not isinstance(doc.get("docType"), str):
+        raise MdocStructureError("document docType must be text")
     issuer_signed = doc.get("issuerSigned", {})
+    if not isinstance(issuer_signed, dict):
+        raise MdocStructureError("issuerSigned must be a map")
     issuer_auth_cbor = issuer_signed.get("issuerAuth")
     issuer_auth = IssuerAuthInfo.from_cose_sign1(issuer_auth_cbor) if issuer_auth_cbor else None
     namespaces = _parse_issuer_signed_namespaces(
@@ -227,10 +293,14 @@ def _parse_document(doc: dict) -> ParsedDocument:
     )
 
     device_signed = doc.get("deviceSigned") or {}
+    if not isinstance(device_signed, dict):
+        raise MdocStructureError("deviceSigned must be a map")
     device_namespaces_tag = device_signed.get("nameSpaces")
-    device_namespaces = _unwrap_tagged24(device_namespaces_tag) if device_namespaces_tag else {}
-    device_namespaces_raw = cbor2.dumps(device_namespaces_tag) if device_namespaces_tag is not None else None
+    device_namespaces = _unwrap_tagged24(device_namespaces_tag)
+    device_namespaces_raw = cbor2.dumps(device_namespaces_tag)
     device_auth = device_signed.get("deviceAuth") or {}
+    if not isinstance(device_auth, dict):
+        raise MdocStructureError("deviceAuth must be a map")
     device_auth_type = next(iter(device_auth), None)
 
     return ParsedDocument(
@@ -300,10 +370,15 @@ def verify_device_auth(
 
 def parse_device_response(plaintext: bytes) -> DeviceResponseResult:
     device_response = cbor2.loads(plaintext)
+    if not isinstance(device_response, dict):
+        raise MdocStructureError("DeviceResponse must be a map")
+    raw_documents = device_response.get("documents", [])
+    if not isinstance(raw_documents, list):
+        raise MdocStructureError("DeviceResponse documents must be an array")
     raw_status = device_response.get("status")
     status = raw_status if type(raw_status) is int else None
     status_name = STATUS_NAMES.get(status, f"unknown({status})") if status is not None else f"unknown({raw_status})"
-    documents = [_parse_document(doc) for doc in device_response.get("documents", [])]
+    documents = [_parse_document(doc) for doc in raw_documents]
     return DeviceResponseResult(
         version=device_response.get("version"),
         status=status,
