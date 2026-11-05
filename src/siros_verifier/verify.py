@@ -64,7 +64,7 @@ def verify_cose_sign1(
     """Verify a COSE_Sign1 = [protected, unprotected, payload, signature].
     `detached_payload` is required when `payload` is null (as for DeviceAuth)."""
     protected_bytes, _unprotected, payload, signature = cose_sign1
-    message_payload = payload if payload is not None else detached_payload
+    message_payload = detached_payload if detached_payload is not None else payload
     if message_payload is None:
         raise UnsupportedAlgorithm("COSE_Sign1 payload is null and no detached content was supplied")
     alg = _cose_alg(cose_sign1)
@@ -106,7 +106,7 @@ def verify_cose_mac0(
     """Verify a COSE_Mac0 = [protected, unprotected, payload, tag]. Only
     HMAC 256/256 (the only algorithm ISO 18013-5 §9.1.3.5 permits) is supported."""
     protected_bytes, _unprotected, payload, tag = cose_mac0
-    message_payload = payload if payload is not None else detached_payload
+    message_payload = detached_payload if detached_payload is not None else payload
     if message_payload is None:
         raise UnsupportedAlgorithm("COSE_Mac0 payload is null and no detached content was supplied")
     alg = _cose_alg(cose_mac0)

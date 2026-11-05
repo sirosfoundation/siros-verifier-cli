@@ -42,7 +42,13 @@ def wallet_engagement():
     return device_priv, de_bytes, mdoc_uri
 
 
-def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "Alice", tamper_device_signature: bool = False) -> dict:
+def make_signed_document(
+    session_transcript_bytes: bytes,
+    *,
+    given_name: str = "Alice",
+    tamper_device_signature: bool = False,
+    replay_inline_device_signature: bool = False,
+) -> dict:
     now = datetime.datetime.now(datetime.timezone.utc)
 
     issuer_signed_items = [
@@ -81,9 +87,16 @@ def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "
     issuer_auth = [protected, {33: cert_der}, mso_payload, sign_es256_raw(ds_priv, issuer_sig_structure)]
 
     device_namespaces_tag = tagged24({})
+    signing_transcript_bytes = session_transcript_bytes
+    if replay_inline_device_signature:
+        current_transcript = cbor2.loads(session_transcript_bytes)
+        historical_reader_key = crypto.cose_key_tag(ec.generate_private_key(ec.SECP256R1()).public_key())
+        signing_transcript_bytes = crypto.build_session_transcript(
+            current_transcript[0].value, historical_reader_key, current_transcript[2]
+        )
     device_authentication = [
         "DeviceAuthentication",
-        cbor2.loads(session_transcript_bytes),
+        cbor2.loads(signing_transcript_bytes),
         DOC_TYPE,
         # Embed the tag object itself (a nested CBOR item), not its serialized
         # bytes - the latter would double-bstr-wrap DeviceNameSpacesBytes,
@@ -97,7 +110,8 @@ def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "
     device_signature = sign_es256_raw(device_key_priv, device_sig_structure)
     if tamper_device_signature:
         device_signature = b"\x00" * 64
-    device_auth = {"deviceSignature": [device_protected, {}, None, device_signature]}
+    cose_payload = detached_payload if replay_inline_device_signature else None
+    device_auth = {"deviceSignature": [device_protected, {}, cose_payload, device_signature]}
 
     return {
         "docType": DOC_TYPE,
@@ -182,15 +196,19 @@ def test_read_dump_cbor_does_not_retain_response(wallet_engagement, monkeypatch,
     assert "SessionData/DeviceResponse dumps are disabled" in captured.err
 
 
-def test_read_end_to_end_rejects_tampered_device_signature(wallet_engagement, monkeypatch, capsys):
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("failure", ["tampered", "replay"])
+def test_read_end_to_end_rejects_invalid_device_auth(wallet_engagement, monkeypatch, capsys, json_output, failure):
     device_priv, de_bytes, mdoc_uri = wallet_engagement
-    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, tamper_device_signature=True))
+    document_kwargs = {"tamper_device_signature": True} if failure == "tampered" else {"replay_inline_device_signature": True}
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, **document_kwargs))
 
-    args = cli.build_parser().parse_args(["read", mdoc_uri])
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
     rc = asyncio.run(cli.run_read(args))
 
     assert rc == 1
     captured = capsys.readouterr()
     assert "device_auth_not_valid" in captured.err
-    assert "given_name =" not in captured.out
-    assert "family_name =" not in captured.out
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
