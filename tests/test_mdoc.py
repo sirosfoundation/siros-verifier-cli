@@ -27,6 +27,8 @@ def build_device_response_bytes(
     status: object = 0,
     issuer_items: list | None = None,
     bignum_value_digest_keys: bool = False,
+    negative_value_digest_key: bool = False,
+    mso_only_negative_value_digest_key: bool = False,
 ) -> bytes:
     now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -44,6 +46,8 @@ def build_device_response_bytes(
         correct_digest.update(cbor2.dumps(tagged_item))
         digest_key = cbor2.CBORTag(2, b"\x01") if bignum_value_digest_keys else digest_id
         value_digests[digest_key] = correct_digest.finalize() if not tamper_digest else b"\x00" * 32
+    if negative_value_digest_key:
+        value_digests[-1] = b"\x00" * 32
 
     device_key_priv = ec.generate_private_key(ec.SECP256R1())
 
@@ -55,6 +59,8 @@ def build_device_response_bytes(
         "docType": "org.iso.18013.5.1.mDL",
         "validityInfo": {"signed": now, "validFrom": now, "validUntil": now + datetime.timedelta(days=30)},
     }
+    if mso_only_negative_value_digest_key:
+        mso["valueDigests"]["mso.only"] = {-1: b"\x00" * 32}
     mso_payload = cbor2.dumps(tagged24(mso))
 
     ds_priv = ec.generate_private_key(ec.SECP256R1())
@@ -297,11 +303,12 @@ def test_parse_rejects_duplicate_element_identifier_with_valid_digests():
         [tagged24(dict(GIVEN_NAME_ITEM, digestID=True))],
         [tagged24(dict(GIVEN_NAME_ITEM, digestID=[]))],
         [tagged24(dict(GIVEN_NAME_ITEM, digestID=cbor2.CBORTag(2, b"\x01")))],
+        [tagged24(dict(GIVEN_NAME_ITEM, digestID=-1))],
         [tagged24(dict(GIVEN_NAME_ITEM, elementIdentifier=1))],
         [tagged24({"digestID": 1, "random": b"\x01" * 16, "elementIdentifier": "given_name"})],
         [cbor2.CBORTag(24, cbor2.dumps(GIVEN_NAME_ITEM) + b"\x00")],
     ],
-    ids=["bare-map", "empty-random", "bool-digest-id", "list-digest-id", "bignum-digest-id", "integer-identifier", "missing-value", "trailing-tag-data"],
+    ids=["bare-map", "empty-random", "bool-digest-id", "list-digest-id", "bignum-digest-id", "negative-digest-id", "integer-identifier", "missing-value", "trailing-tag-data"],
 )
 def test_parse_rejects_malformed_issuer_items(items):
     with pytest.raises(MdocStructureError):
@@ -311,6 +318,16 @@ def test_parse_rejects_malformed_issuer_items(items):
 def test_parse_rejects_bignum_value_digest_key():
     with pytest.raises(MdocStructureError):
         parse_device_response(build_device_response_bytes(bignum_value_digest_keys=True))
+
+
+def test_parse_rejects_negative_value_digest_key_with_other_valid_digests():
+    with pytest.raises(MdocStructureError, match="invalid valueDigests entry"):
+        parse_device_response(build_device_response_bytes(negative_value_digest_key=True))
+
+
+def test_parse_rejects_negative_value_digest_key_in_mso_only_namespace():
+    with pytest.raises(MdocStructureError, match="invalid valueDigests entry"):
+        parse_device_response(build_device_response_bytes(mso_only_negative_value_digest_key=True))
 
 
 @pytest.mark.parametrize(

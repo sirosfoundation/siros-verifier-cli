@@ -120,6 +120,12 @@ class MobileSecurityObject:
         value_digests = mso.get("valueDigests", {})
         if not isinstance(value_digests, Mapping):
             raise MdocStructureError("MSO valueDigests must be a map")
+        for namespace, digests in value_digests.items():
+            if not isinstance(namespace, str) or not isinstance(digests, Mapping):
+                raise MdocStructureError("invalid MSO valueDigests namespace")
+            for digest_id, expected_digest in digests.items():
+                if type(digest_id) is not int or not 0 <= digest_id < (1 << 64) or not isinstance(expected_digest, bytes):
+                    raise MdocStructureError(f"invalid valueDigests entry for namespace {namespace!r}")
         device_key_info = mso.get("deviceKeyInfo") or {}
         if not isinstance(device_key_info, Mapping):
             raise MdocStructureError("MSO deviceKeyInfo must be a map")
@@ -231,10 +237,6 @@ def _parse_issuer_signed_namespaces(
         digests = mso.value_digests.get(ns)
         if not isinstance(digests, Mapping):
             raise MdocStructureError(f"issuer namespace {ns!r} is absent from valueDigests")
-        for digest_id, expected_digest in digests.items():
-            if type(digest_id) is not int or not isinstance(expected_digest, bytes):
-                raise MdocStructureError(f"invalid valueDigests entry for namespace {ns!r}")
-
         elements = []
         seen_digest_ids: set[int] = set()
         seen_identifiers: set[str] = set()
@@ -243,8 +245,8 @@ def _parse_issuer_signed_namespaces(
             if not isinstance(item, Mapping):
                 raise MdocStructureError("IssuerSignedItem must be a map")
             digest_id = item.get("digestID")
-            if type(digest_id) is not int or not -(1 << 64) <= digest_id < (1 << 64):
-                raise MdocStructureError("IssuerSignedItem digestID must be an ordinary integer")
+            if type(digest_id) is not int or not 0 <= digest_id < (1 << 64):
+                raise MdocStructureError("IssuerSignedItem digestID must be an unsigned ordinary integer")
             if digest_id in seen_digest_ids:
                 raise MdocStructureError("duplicate_digest_id")
             seen_digest_ids.add(digest_id)

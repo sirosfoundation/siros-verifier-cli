@@ -48,6 +48,7 @@ def make_signed_document(
     *,
     given_name: str = "Alice",
     tamper_device_signature: bool = False,
+    tamper_device_mac: bool = False,
     replay_inline_device_signature: bool = False,
     replay_inline_device_auth: bool = False,
     device_auth_method: str = "signature",
@@ -127,7 +128,7 @@ def make_signed_document(
         mac_structure = cbor2.dumps(["MAC0", device_protected, b"", detached_payload])
         mac = hmac_primitive.HMAC(emac_key, hashes.SHA256())
         mac.update(mac_structure)
-        tag = mac.finalize()
+        tag = b"\x00" * 32 if tamper_device_mac else mac.finalize()
         device_auth = {"deviceMac": [device_protected, {}, cose_payload, tag]}
     else:
         device_protected = cbor2.dumps({1: -7})
@@ -226,6 +227,26 @@ def test_read_rejects_inline_historical_device_mac(wallet_engagement, monkeypatc
         ble,
         "exchange",
         make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", replay_inline_device_auth=True),
+    )
+
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "device_auth_not_valid" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_rejects_tampered_device_mac(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(
+        ble,
+        "exchange",
+        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", tamper_device_mac=True),
     )
 
     argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
