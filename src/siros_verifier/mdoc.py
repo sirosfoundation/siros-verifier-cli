@@ -15,6 +15,7 @@ here means "internally consistent with the presented key", not "trustworthy".
 from __future__ import annotations
 
 import io
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -84,7 +85,7 @@ def _unwrap_tagged24(value):
     if not isinstance(value, cbor2.CBORTag) or value.tag != 24 or not isinstance(value.value, bytes):
         raise MdocStructureError("expected tag-24 encoded bytes")
     stream = io.BytesIO(value.value)
-    decoded = cbor2.CBORDecoder(stream, semantic_decoders=_BIGNUM_DECODERS).decode()
+    decoded = cbor2.CBORDecoder(stream, semantic_decoders=_BIGNUM_DECODERS).decode(immutable=False)
     if stream.tell() != len(value.value):
         raise MdocStructureError("trailing data in tag-24 encoded bytes")
     return decoded
@@ -117,19 +118,19 @@ class MobileSecurityObject:
     version: str | None
     digest_algorithm: str | None
     doc_type: str | None
-    value_digests: dict
+    value_digests: Mapping
     device_key: dict | None
-    validity_info: dict
+    validity_info: Mapping
 
     @classmethod
-    def from_cbor(cls, mso: dict) -> MobileSecurityObject:
-        if not isinstance(mso, dict):
+    def from_cbor(cls, mso: Mapping) -> MobileSecurityObject:
+        if not isinstance(mso, Mapping):
             raise MdocStructureError("MSO must be a map")
         value_digests = mso.get("valueDigests", {})
-        if not isinstance(value_digests, dict):
+        if not isinstance(value_digests, Mapping):
             raise MdocStructureError("MSO valueDigests must be a map")
         device_key_info = mso.get("deviceKeyInfo") or {}
-        if not isinstance(device_key_info, dict):
+        if not isinstance(device_key_info, Mapping):
             raise MdocStructureError("MSO deviceKeyInfo must be a map")
         return cls(
             version=mso.get("version"),
@@ -150,11 +151,11 @@ class IssuerAuthInfo:
     signature_valid: bool | None = None  # None = not attempted (no cert / unsupported alg)
 
     @classmethod
-    def from_cose_sign1(cls, cose_sign1: list) -> IssuerAuthInfo:
-        if not isinstance(cose_sign1, list) or len(cose_sign1) != 4:
+    def from_cose_sign1(cls, cose_sign1: list | tuple) -> IssuerAuthInfo:
+        if not isinstance(cose_sign1, (list, tuple)) or len(cose_sign1) != 4:
             raise MdocStructureError("IssuerAuth must be a four-element COSE_Sign1 array")
         protected_bytes, unprotected, payload, signature = cose_sign1
-        if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, dict):
+        if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, Mapping):
             raise MdocStructureError("invalid IssuerAuth COSE headers")
         if not isinstance(payload, bytes) or not isinstance(signature, bytes):
             raise MdocStructureError("invalid IssuerAuth COSE payload or signature")
@@ -185,7 +186,7 @@ class IssuerAuthInfo:
                 signature_valid = None
 
         mso_cbor = _unwrap_tagged24(cbor2.loads(payload)) if payload else None
-        mso = MobileSecurityObject.from_cbor(mso_cbor) if isinstance(mso_cbor, dict) else None
+        mso = MobileSecurityObject.from_cbor(mso_cbor) if isinstance(mso_cbor, Mapping) else None
 
         return cls(
             alg=alg, alg_name=alg_name, certificates=certificates, mso=mso, signature_valid=signature_valid
@@ -205,10 +206,10 @@ class ParsedDocument:
     doc_type: str
     namespaces: dict[str, list[ParsedElement]]
     issuer_auth: IssuerAuthInfo | None
-    device_namespaces: dict[str, dict]
+    device_namespaces: Mapping
     device_auth_type: str | None  # "deviceSignature" | "deviceMac" | None
-    errors: dict
-    device_auth_cbor: dict = field(default_factory=dict)
+    errors: Mapping
+    device_auth_cbor: Mapping = field(default_factory=dict)
     device_namespaces_raw: bytes | None = None
     device_auth_valid: bool | None = None  # set by verify_device_auth(), which needs session context
 
@@ -219,13 +220,13 @@ class DeviceResponseResult:
     status: int | None
     status_name: str
     documents: list[ParsedDocument]
-    document_errors: list[dict]
+    document_errors: list[Mapping]
 
 
 def _parse_issuer_signed_namespaces(
     name_spaces_cbor: dict, mso: MobileSecurityObject | None
 ) -> dict[str, list[ParsedElement]]:
-    if not isinstance(name_spaces_cbor, dict):
+    if not isinstance(name_spaces_cbor, Mapping):
         raise MdocStructureError("issuerSigned nameSpaces must be a map")
     if mso is None:
         raise MdocStructureError("issuerSigned content requires an MSO")
@@ -234,10 +235,10 @@ def _parse_issuer_signed_namespaces(
     for ns, tagged_items in name_spaces_cbor.items():
         if not isinstance(ns, str):
             raise MdocStructureError("issuer namespace must be text")
-        if not isinstance(tagged_items, list):
+        if not isinstance(tagged_items, (list, tuple)):
             raise MdocStructureError(f"issuer namespace {ns!r} must contain an array")
         digests = mso.value_digests.get(ns)
-        if not isinstance(digests, dict):
+        if not isinstance(digests, Mapping):
             raise MdocStructureError(f"issuer namespace {ns!r} is absent from valueDigests")
         for digest_id, expected_digest in digests.items():
             if type(digest_id) is not int or not isinstance(expected_digest, bytes):
@@ -248,7 +249,7 @@ def _parse_issuer_signed_namespaces(
         seen_identifiers: set[str] = set()
         for tagged_item in tagged_items:
             item = _unwrap_tagged24(tagged_item)
-            if not isinstance(item, dict):
+            if not isinstance(item, Mapping):
                 raise MdocStructureError("IssuerSignedItem must be a map")
             digest_id = item.get("digestID")
             if type(digest_id) is not int or not -(1 << 64) <= digest_id < (1 << 64):
@@ -292,10 +293,10 @@ def _parse_issuer_signed_namespaces(
 
 
 def _parse_document(doc: dict) -> ParsedDocument:
-    if not isinstance(doc, dict) or not isinstance(doc.get("docType"), str):
+    if not isinstance(doc, Mapping) or not isinstance(doc.get("docType"), str):
         raise MdocStructureError("document docType must be text")
     issuer_signed = doc.get("issuerSigned", {})
-    if not isinstance(issuer_signed, dict):
+    if not isinstance(issuer_signed, Mapping):
         raise MdocStructureError("issuerSigned must be a map")
     issuer_auth_cbor = issuer_signed.get("issuerAuth")
     issuer_auth = IssuerAuthInfo.from_cose_sign1(issuer_auth_cbor) if issuer_auth_cbor else None
@@ -304,13 +305,13 @@ def _parse_document(doc: dict) -> ParsedDocument:
     )
 
     device_signed = doc.get("deviceSigned") or {}
-    if not isinstance(device_signed, dict):
+    if not isinstance(device_signed, Mapping):
         raise MdocStructureError("deviceSigned must be a map")
     device_namespaces_tag = device_signed.get("nameSpaces")
     device_namespaces = _unwrap_tagged24(device_namespaces_tag)
     device_namespaces_raw = cbor2.dumps(device_namespaces_tag)
     device_auth = device_signed.get("deviceAuth") or {}
-    if not isinstance(device_auth, dict):
+    if not isinstance(device_auth, Mapping):
         raise MdocStructureError("deviceAuth must be a map")
     device_auth_type = next(iter(device_auth), None)
 
@@ -334,7 +335,7 @@ def verify_device_auth(
     private key and the SessionTranscript, so this runs as a separate pass
     over an already-parsed ParsedDocument rather than inside parse_device_response."""
     mso = doc.issuer_auth.mso if doc.issuer_auth else None
-    if not isinstance(doc.device_auth_cbor, dict) or len(doc.device_auth_cbor) != 1:
+    if not isinstance(doc.device_auth_cbor, Mapping) or len(doc.device_auth_cbor) != 1:
         return None
     if not doc.device_auth_type or mso is None or mso.device_key is None or doc.device_namespaces_raw is None:
         return None
@@ -362,14 +363,14 @@ def verify_device_auth(
     try:
         if doc.device_auth_type == "deviceSignature":
             structure = doc.device_auth_cbor["deviceSignature"]
-            if not isinstance(structure, list) or len(structure) != 4 or structure[2] is not None:
+            if not isinstance(structure, (list, tuple)) or len(structure) != 4 or structure[2] is not None:
                 return None
             return verify.verify_cose_sign1(structure, device_pub, detached_payload=detached_payload)
         if doc.device_auth_type == "deviceMac":
             if not isinstance(device_pub, ec.EllipticCurvePublicKey):
                 return None
             structure = doc.device_auth_cbor["deviceMac"]
-            if not isinstance(structure, list) or len(structure) != 4 or structure[2] is not None:
+            if not isinstance(structure, (list, tuple)) or len(structure) != 4 or structure[2] is not None:
                 return None
             zab = e_reader_priv.exchange(ec.ECDH(), device_pub)
             emac_key = crypto.derive_emac_key(zab, session_transcript)
@@ -381,7 +382,7 @@ def verify_device_auth(
 
 def parse_device_response(plaintext: bytes) -> DeviceResponseResult:
     device_response = cbor2.loads(plaintext)
-    if not isinstance(device_response, dict):
+    if not isinstance(device_response, Mapping):
         raise MdocStructureError("DeviceResponse must be a map")
     raw_documents = device_response.get("documents", [])
     if not isinstance(raw_documents, list):
@@ -411,16 +412,16 @@ def _valid_error_code(code: object) -> bool:
 
 def _valid_document_errors(errors: object) -> bool:
     return isinstance(errors, list) and all(
-        isinstance(item, dict)
+        isinstance(item, Mapping)
         and all(isinstance(doc_type, str) and _valid_error_code(code) for doc_type, code in item.items())
         for item in errors
     )
 
 
 def _valid_element_errors(errors: object) -> bool:
-    return isinstance(errors, dict) and all(
+    return isinstance(errors, Mapping) and all(
         isinstance(namespace, str)
-        and isinstance(items, dict)
+        and isinstance(items, Mapping)
         and all(isinstance(identifier, str) and _valid_error_code(code) for identifier, code in items.items())
         for namespace, items in errors.items()
     )
@@ -475,7 +476,7 @@ def validate_device_response(
             if mso.doc_type != doc.doc_type:
                 errors.append(f"{prefix}: doc_type_mismatch")
 
-            if not isinstance(mso.validity_info, dict):
+            if not isinstance(mso.validity_info, Mapping):
                 errors.append(f"{prefix}: validity_info")
             else:
                 validity = {
@@ -502,7 +503,7 @@ def validate_device_response(
 
         if doc.device_auth_valid is not True:
             errors.append(f"{prefix}: device_auth_not_valid")
-        if not isinstance(doc.device_namespaces, dict) or doc.device_namespaces:
+        if not isinstance(doc.device_namespaces, Mapping) or doc.device_namespaces:
             errors.append(f"{prefix}: device_namespaces_unsupported")
         if not _valid_element_errors(doc.errors):
             errors.append(f"{prefix}: invalid_errors")
