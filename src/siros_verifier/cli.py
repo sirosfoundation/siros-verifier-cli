@@ -246,9 +246,9 @@ async def run_read(args: argparse.Namespace) -> int:
             print(f"  - {error}", file=sys.stderr)
         return 1
 
-    if args.pdp_url:
+    if args.pdp_url is not None:
         try:
-            trust.authorize_documents(
+            await trust.authorize_documents(
                 response.documents,
                 args.pdp_url,
                 args.mdoc_issuer_role,
