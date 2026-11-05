@@ -18,8 +18,10 @@ import cbor2
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from test_cli_read import make_fake_exchange
 
 from siros_verifier import ble, cli, crypto, fuzz
+from siros_verifier.mdoc import ParsedElement
 
 
 @pytest.fixture
@@ -192,6 +194,57 @@ def test_fuzz_truncated_session_establishment_reports_expected_status(wallet_eng
     assert rc == 0
     err = capsys.readouterr().err
     assert "expected/correct response" in err
+
+
+def test_fuzz_escapes_session_data_status(wallet_engagement, monkeypatch, capsys):
+    _device_priv, _de_bytes, mdoc_uri = wallet_engagement
+
+    async def fake_exchange(*args, **kwargs):
+        return ble.ExchangeResult(
+            session_data_bytes=cbor2.dumps({"status": "bad\x1b[2J"}),
+            negotiated_mtu=185,
+            chunk_size=182,
+            device_address="AA:BB:CC:DD:EE:FF",
+        )
+
+    monkeypatch.setattr(ble, "exchange", fake_exchange)
+    args = cli.build_parser().parse_args(["fuzz", mdoc_uri, fuzz.Scenario.GARBAGE_CBOR_REQUEST.value])
+    rc = asyncio.run(cli.run_fuzz(args))
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.err
+    assert "bad\\x1b[2J" in captured.err
+
+
+def test_fuzz_decryptable_response_renders_huge_integer_map_keys(wallet_engagement, monkeypatch, capsys):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
+    original_parse = cli.mdoc.parse_device_response
+
+    def parse_with_large_map_key(plaintext):
+        result = original_parse(plaintext)
+        result.documents[0].namespaces["org.iso.18013.5.1"].append(
+            ParsedElement(identifier="map", value={1 << 20000: "value"}, digest_id=99, digest_valid=True)
+        )
+        return result
+
+    monkeypatch.setattr(cli.mdoc, "parse_device_response", parse_with_large_map_key)
+
+    def valid_session_establishment(e_reader_key_tag, sk_reader):
+        request = cli.mdoc.build_device_request(
+            [cli.mdoc.DocRequest(doc_type="org.iso.18013.5.1.mDL", namespaces={"org.iso.18013.5.1": ["given_name"]})]
+        )
+        return cli.mdoc.build_session_establishment(e_reader_key_tag, crypto.encrypt_reader_message(sk_reader, 1, request))
+
+    monkeypatch.setattr(cli.fuzz, "build_garbage_request_session_establishment", valid_session_establishment)
+    args = cli.build_parser().parse_args(["fuzz", mdoc_uri, fuzz.Scenario.GARBAGE_CBOR_REQUEST.value])
+    rc = asyncio.run(cli.run_fuzz(args))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "given_name" in out
+    assert "0x" in out
 
 
 def test_fuzz_rejects_central_client_mode():

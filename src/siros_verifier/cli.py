@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import sys
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -115,6 +117,10 @@ def _dump_cbor(dump_dir: str | None, name: str, data: bytes) -> None:
     (out_dir / name).write_bytes(data)
 
 
+def _safe_diagnostic(value: object) -> str:
+    return display.safe_text(value)
+
+
 def cmd_engagement_decode(args: argparse.Namespace) -> int:
     uri = _resolve_engagement_uri(args)
     try:
@@ -127,8 +133,8 @@ def cmd_engagement_decode(args: argparse.Namespace) -> int:
 
 
 def print_engagement(de: DeviceEngagement) -> None:
-    print(f"version: {de.version}")
-    print(f"cipher suite: {de.cipher_suite}")
+    print(f"version: {_safe_diagnostic(de.version)}")
+    print(f"cipher suite: {_safe_diagnostic(de.cipher_suite)}")
     numbers = de.e_device_key_pub.public_numbers()
     print(f"EDeviceKey.Pub: x={numbers.x:064x} y={numbers.y:064x}")
     print(f"peripheral server mode UUID: {de.peripheral_server_uuid or '(not offered)'}")
@@ -230,19 +236,45 @@ async def run_read(args: argparse.Namespace) -> int:
     if "data" not in session_data:
         status = session_data.get("status")
         name = SESSION_STATUS_NAMES.get(status, f"unknown({status})")
-        print(f"error: mdoc returned SessionData with no data, status={status} ({name})", file=sys.stderr)
+        print(
+            f"error: mdoc returned SessionData with no data, "
+            f"status={_safe_diagnostic(status)} ({_safe_diagnostic(name)})",
+            file=sys.stderr,
+        )
         return 1
 
     plaintext = crypto.decrypt_device_message(sk_device, 1, session_data["data"])
-    response = mdoc.parse_device_response(plaintext)
-    for doc in response.documents:
-        doc.device_auth_valid = mdoc.verify_device_auth(doc, session_transcript, e_reader_priv)
+    try:
+        response = mdoc.parse_device_response(plaintext)
+        for doc in response.documents:
+            doc.device_auth_valid = mdoc.verify_device_auth(doc, session_transcript, e_reader_priv)
+        validation_errors = mdoc.validate_device_response(response, doc_requests)
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        print(f"error: malformed DeviceResponse; no claims released: {_safe_diagnostic(exc)}", file=sys.stderr)
+        return 1
 
+    if validation_errors:
+        print("error: DeviceResponse verification failed; no claims released:", file=sys.stderr)
+        for error in validation_errors:
+            print(f"  - {_safe_diagnostic(error)}", file=sys.stderr)
+        return 1
+
+    try:
+        if args.json:
+            rendered = display.to_json(response)
+        else:
+            output_buffer = io.StringIO()
+            with redirect_stdout(output_buffer):
+                print_device_response(response)
+            rendered = output_buffer.getvalue()
+    except (ValueError, TypeError, RecursionError) as exc:
+        print(f"error: unable to render DeviceResponse; no claims released: {_safe_diagnostic(exc)}", file=sys.stderr)
+        return 1
     if args.json:
-        print(display.to_json(response))
+        print(rendered)
     else:
-        print_device_response(response)
-    return 0 if response.status == 0 else 1
+        print(rendered, end="")
+    return 0
 
 
 def _require_peripheral_mode(de: DeviceEngagement, mode: str) -> None:
@@ -306,7 +338,8 @@ async def run_fuzz(args: argparse.Namespace) -> int:
             status = session_data.get("status")
             name = SESSION_STATUS_NAMES.get(status, f"unknown({status})")
             print(
-                f"result: mdoc returned SessionData with no data, status={status} ({name}) - "
+                f"result: mdoc returned SessionData with no data, "
+                f"status={_safe_diagnostic(status)} ({_safe_diagnostic(name)}) - "
                 "this is the expected/correct response to this scenario",
                 file=sys.stderr,
             )
@@ -373,52 +406,62 @@ def _verdict(value: bool | None, true_word: str = "VALID", false_word: str = "IN
     return true_word if value else false_word
 
 
-def print_device_response(response: mdoc.DeviceResponseResult) -> None:
+def _write_device_response(response: mdoc.DeviceResponseResult) -> None:
     print("\n--- DeviceResponse ---")
-    print(f"version: {response.version}")
-    print(f"status: {response.status} ({response.status_name})")
+    print(f"version: {_safe_diagnostic(response.version)}")
+    print(f"status: {_safe_diagnostic(response.status)} ({_safe_diagnostic(response.status_name)})")
     for error in response.document_errors:
         for doc_type, code in error.items():
             name = mdoc.ERROR_CODE_NAMES.get(code, "application-specific" if code < 0 else "RFU")
-            print(f"document error: {doc_type} -> {code} ({name})")
+            print(f"document error: {_safe_diagnostic(doc_type)} -> {code} ({name})")
 
     for doc in response.documents:
-        print(f"\ndocType: {doc.doc_type}")
+        print(f"\ndocType: {_safe_diagnostic(doc.doc_type)}")
         for ns, elements in doc.namespaces.items():
-            print(f"  namespace {ns}:")
+            print(f"  namespace {_safe_diagnostic(ns)}:")
             for element in elements:
                 digest_note = f" [digest {_verdict(element.digest_valid, 'OK', 'MISMATCH')}]" if element.digest_id is not None else ""
-                print(f"    {element.identifier} = {display.format_value(element.value)}{digest_note}")
+                print(f"    {_safe_diagnostic(element.identifier)} = {display.format_value(element.value)}{digest_note}")
 
         if doc.device_namespaces:
             print("  deviceSigned nameSpaces:")
             for ns, items in doc.device_namespaces.items():
-                print(f"    {ns}:")
+                print(f"    {_safe_diagnostic(ns)}:")
                 for identifier, value in items.items():
-                    print(f"      {identifier} = {display.format_value(value)}")
+                    print(f"      {_safe_diagnostic(identifier)} = {display.format_value(value)}")
 
         for ns, error_items in doc.errors.items():
             for identifier, code in error_items.items():
                 name = mdoc.ERROR_CODE_NAMES.get(code, "application-specific" if code < 0 else "RFU")
-                print(f"  error: {ns}.{identifier} -> {code} ({name})")
+                print(f"  error: {_safe_diagnostic(ns)}.{_safe_diagnostic(identifier)} -> {code} ({name})")
 
         if doc.issuer_auth:
             ia = doc.issuer_auth
             print(f"  issuerAuth: alg={ia.alg_name} signature={_verdict(ia.signature_valid)}")
             for cert in ia.certificates:
-                print(f"    certificate: subject={cert.subject}")
-                print(f"                 issuer={cert.issuer} serial={cert.serial_number:x}")
+                print(f"    certificate: subject={_safe_diagnostic(cert.subject)}")
+                print(f"                 issuer={_safe_diagnostic(cert.issuer)} serial={cert.serial_number:x}")
                 print(f"                 validity={cert.not_before} .. {cert.not_after} [chain/trust NOT evaluated]")
             if ia.mso:
                 mso = ia.mso
-                print(f"  MSO: version={mso.version} digestAlgorithm={mso.digest_algorithm} docType={mso.doc_type}")
+                print(
+                    f"  MSO: version={_safe_diagnostic(mso.version)} "
+                    f"digestAlgorithm={_safe_diagnostic(mso.digest_algorithm)} docType={_safe_diagnostic(mso.doc_type)}"
+                )
                 signed = mso.validity_info.get("signed")
                 valid_from = mso.validity_info.get("validFrom")
                 valid_until = mso.validity_info.get("validUntil")
                 print(f"       signed={signed} validFrom={valid_from} validUntil={valid_until}")
 
         if doc.device_auth_type:
-            print(f"  deviceAuth: {doc.device_auth_type} {_verdict(doc.device_auth_valid)}")
+            print(f"  deviceAuth: {_safe_diagnostic(doc.device_auth_type)} {_verdict(doc.device_auth_valid)}")
+
+
+def print_device_response(response: mdoc.DeviceResponseResult) -> None:
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        _write_device_response(response)
+    print(buffer.getvalue(), end="")
 
 
 def cmd_qr_scan(args: argparse.Namespace) -> int:

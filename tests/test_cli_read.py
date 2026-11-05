@@ -18,6 +18,7 @@ import uuid
 import cbor2
 import pytest
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hmac as hmac_primitive
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from helpers import cose_key_from_public_key, make_self_signed_cert_der, sign_es256_raw, tagged24
@@ -42,23 +43,49 @@ def wallet_engagement():
     return device_priv, de_bytes, mdoc_uri
 
 
-def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "Alice", tamper_device_signature: bool = False) -> dict:
-    now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+def make_signed_document(
+    session_transcript_bytes: bytes,
+    *,
+    given_name: str = "Alice",
+    tamper_device_signature: bool = False,
+    tamper_device_mac: bool = False,
+    replay_inline_device_signature: bool = False,
+    replay_inline_device_auth: bool = False,
+    device_auth_method: str = "signature",
+    e_reader_pub: ec.EllipticCurvePublicKey | None = None,
+    device_namespaces: object = None,
+    device_namespaces_tagged: bool = True,
+    additional_device_auth: dict | None = None,
+    errors: object = None,
+) -> dict:
+    now = datetime.datetime.now(datetime.timezone.utc)
 
-    issuer_signed_item = tagged24(
-        {"digestID": 1, "random": b"\x00" * 16, "elementIdentifier": "given_name", "elementValue": given_name}
-    )
-    item_digest = hashes.Hash(hashes.SHA256())
-    item_digest.update(cbor2.dumps(issuer_signed_item))
+    issuer_signed_items = [
+        tagged24(
+            {"digestID": 1, "random": b"\x00" * 16, "elementIdentifier": "given_name", "elementValue": given_name}
+        ),
+        tagged24(
+            {"digestID": 2, "random": b"\x01" * 16, "elementIdentifier": "family_name", "elementValue": "Smith"}
+        ),
+    ]
+    value_digests = {}
+    for item in issuer_signed_items:
+        item_digest = hashes.Hash(hashes.SHA256())
+        item_digest.update(cbor2.dumps(item))
+        value_digests[cbor2.loads(item.value)["digestID"]] = item_digest.finalize()
 
     device_key_priv = ec.generate_private_key(ec.SECP256R1())  # SDeviceKey, distinct from EDeviceKey
     mso = {
         "version": "1.0",
         "digestAlgorithm": "SHA-256",
-        "valueDigests": {"org.iso.18013.5.1": {1: item_digest.finalize()}},
+        "valueDigests": {"org.iso.18013.5.1": value_digests},
         "deviceKeyInfo": {"deviceKey": cose_key_from_public_key(device_key_priv.public_key())},
         "docType": DOC_TYPE,
-        "validityInfo": {"signed": now, "validFrom": now, "validUntil": now + datetime.timedelta(days=1)},
+        "validityInfo": {
+            "signed": now,
+            "validFrom": now - datetime.timedelta(minutes=1),
+            "validUntil": now + datetime.timedelta(days=1),
+        },
     }
     mso_payload = cbor2.dumps(tagged24(mso))
 
@@ -68,10 +95,22 @@ def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "
     issuer_sig_structure = cbor2.dumps(["Signature1", protected, b"", mso_payload])
     issuer_auth = [protected, {33: cert_der}, mso_payload, sign_es256_raw(ds_priv, issuer_sig_structure)]
 
-    device_namespaces_tag = tagged24({})
+    raw_device_namespaces = device_namespaces if device_namespaces is not None else {}
+    device_namespaces_tag = tagged24(raw_device_namespaces) if device_namespaces_tagged else raw_device_namespaces
+    replay_inline = replay_inline_device_signature or replay_inline_device_auth
+    signing_transcript_bytes = session_transcript_bytes
+    signing_reader_pub = e_reader_pub
+    if replay_inline:
+        current_transcript = cbor2.loads(session_transcript_bytes)
+        historical_reader_priv = ec.generate_private_key(ec.SECP256R1())
+        signing_reader_pub = historical_reader_priv.public_key()
+        historical_reader_key = crypto.cose_key_tag(signing_reader_pub)
+        signing_transcript_bytes = crypto.build_session_transcript(
+            current_transcript[0].value, historical_reader_key, current_transcript[2]
+        )
     device_authentication = [
         "DeviceAuthentication",
-        cbor2.loads(session_transcript_bytes),
+        cbor2.loads(signing_transcript_bytes),
         DOC_TYPE,
         # Embed the tag object itself (a nested CBOR item), not its serialized
         # bytes - the latter would double-bstr-wrap DeviceNameSpacesBytes,
@@ -80,17 +119,31 @@ def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "
         device_namespaces_tag,
     ]
     detached_payload = cbor2.dumps(tagged24(device_authentication))
-    device_protected = cbor2.dumps({1: -7})
-    device_sig_structure = cbor2.dumps(["Signature1", device_protected, b"", detached_payload])
-    device_signature = sign_es256_raw(device_key_priv, device_sig_structure)
-    if tamper_device_signature:
-        device_signature = b"\x00" * 64
-    device_auth = {"deviceSignature": [device_protected, {}, None, device_signature]}
+    cose_payload = detached_payload if replay_inline else None
+    if device_auth_method == "mac":
+        assert e_reader_pub is not None
+        zab = device_key_priv.exchange(ec.ECDH(), signing_reader_pub)
+        emac_key = crypto.derive_emac_key(zab, signing_transcript_bytes)
+        device_protected = cbor2.dumps({1: 5})
+        mac_structure = cbor2.dumps(["MAC0", device_protected, b"", detached_payload])
+        mac = hmac_primitive.HMAC(emac_key, hashes.SHA256())
+        mac.update(mac_structure)
+        tag = b"\x00" * 32 if tamper_device_mac else mac.finalize()
+        device_auth = {"deviceMac": [device_protected, {}, cose_payload, tag]}
+    else:
+        device_protected = cbor2.dumps({1: -7})
+        device_sig_structure = cbor2.dumps(["Signature1", device_protected, b"", detached_payload])
+        device_signature = sign_es256_raw(device_key_priv, device_sig_structure)
+        if tamper_device_signature:
+            device_signature = b"\x00" * 64
+        device_auth = {"deviceSignature": [device_protected, {}, cose_payload, device_signature]}
+    device_auth.update(additional_device_auth or {})
 
     return {
         "docType": DOC_TYPE,
-        "issuerSigned": {"nameSpaces": {"org.iso.18013.5.1": [issuer_signed_item]}, "issuerAuth": issuer_auth},
+        "issuerSigned": {"nameSpaces": {"org.iso.18013.5.1": issuer_signed_items}, "issuerAuth": issuer_auth},
         "deviceSigned": {"nameSpaces": device_namespaces_tag, "deviceAuth": device_auth},
+        "errors": errors if errors is not None else {},
     }
 
 
@@ -106,7 +159,7 @@ def make_fake_exchange(device_priv, de_bytes, **document_kwargs):
         # sanity-check the reader's request decrypts correctly with the device's own derivation
         cbor2.loads(AESGCM(sk_reader).decrypt(crypto.gcm_iv(crypto.READER_IDENTIFIER, 1), se["data"], b""))
 
-        document = make_signed_document(transcript, **document_kwargs)
+        document = make_signed_document(transcript, e_reader_pub=reader_pub, **document_kwargs)
         device_response = cbor2.dumps({"version": "1.0", "documents": [document], "status": 0})
         ciphertext = AESGCM(sk_device).encrypt(crypto.gcm_iv(crypto.MDOC_IDENTIFIER, 1), device_response, b"")
         session_data_bytes = cbor2.dumps({"data": ciphertext})
@@ -153,6 +206,60 @@ def test_read_end_to_end_json(wallet_engagement, monkeypatch, capsys):
     assert doc["device_auth_valid"] is True
 
 
+def test_read_accepts_detached_device_mac(wallet_engagement, monkeypatch, capsys):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, device_auth_method="mac"))
+
+    args = cli.build_parser().parse_args(["read", mdoc_uri, "--json"])
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{") :])
+    assert payload["documents"][0]["device_auth_type"] == "deviceMac"
+    assert payload["documents"][0]["device_auth_valid"] is True
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_rejects_inline_historical_device_mac(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(
+        ble,
+        "exchange",
+        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", replay_inline_device_auth=True),
+    )
+
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "device_auth_not_valid" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_rejects_tampered_device_mac(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(
+        ble,
+        "exchange",
+        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", tamper_device_mac=True),
+    )
+
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "device_auth_not_valid" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
 def test_read_dump_cbor_does_not_retain_response(wallet_engagement, monkeypatch, capsys, tmp_path):
     device_priv, de_bytes, mdoc_uri = wallet_engagement
     monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
@@ -170,13 +277,88 @@ def test_read_dump_cbor_does_not_retain_response(wallet_engagement, monkeypatch,
     assert "SessionData/DeviceResponse dumps are disabled" in captured.err
 
 
-def test_read_end_to_end_detects_tampered_device_signature(wallet_engagement, monkeypatch, capsys):
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("failure", ["tampered", "replay"])
+def test_read_end_to_end_rejects_invalid_device_auth(wallet_engagement, monkeypatch, capsys, json_output, failure):
     device_priv, de_bytes, mdoc_uri = wallet_engagement
-    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, tamper_device_signature=True))
+    document_kwargs = {"tamper_device_signature": True} if failure == "tampered" else {"replay_inline_device_signature": True}
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, **document_kwargs))
 
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "device_auth_not_valid" in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize(
+    ("document_kwargs", "expected_error"),
+    [
+        ({"device_namespaces": {"org.iso.18013.5.1": {"device_claim": "value"}}}, "device_namespaces_unsupported"),
+        ({"errors": {"org.iso.18013.5.1": {"other": []}}}, "invalid_errors"),
+        ({"errors": {"org.iso.18013.5.1": {"other": 1 << 20000}}}, "invalid_errors"),
+        ({"device_namespaces": []}, "device_namespaces_unsupported"),
+        ({"device_namespaces": [], "device_namespaces_tagged": False}, "malformed DeviceResponse"),
+        ({"device_namespaces": {}, "device_namespaces_tagged": False}, "malformed DeviceResponse"),
+        ({"additional_device_auth": {"deviceMac": [b"", {}, None, b""]}}, "device_auth_not_valid"),
+    ],
+)
+def test_read_rejects_unsafe_response_content(
+    wallet_engagement, monkeypatch, capsys, json_output, document_kwargs, expected_error
+):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, **document_kwargs))
+
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert expected_error in captured.err
+    assert "given_name" not in captured.out
+    assert "family_name" not in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_escapes_validation_diagnostics(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
+    monkeypatch.setattr(cli.mdoc, "validate_device_response", lambda *args, **kwargs: ["bad\x1b[31m\nforged"])
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.err
+    assert "\nforged" not in captured.err
+    assert "bad\\x1b[31m\\nforged" in captured.err
+    assert "given_name" not in captured.out
+
+
+def test_read_escapes_session_data_status(wallet_engagement, monkeypatch, capsys):
+    _device_priv, _de_bytes, mdoc_uri = wallet_engagement
+
+    async def fake_exchange(*args, **kwargs):
+        return ble.ExchangeResult(
+            session_data_bytes=cbor2.dumps({"status": "bad\x1b[2J"}),
+            negotiated_mtu=185,
+            chunk_size=182,
+            device_address="AA:BB:CC:DD:EE:FF",
+        )
+
+    monkeypatch.setattr(ble, "exchange", fake_exchange)
     args = cli.build_parser().parse_args(["read", mdoc_uri])
     rc = asyncio.run(cli.run_read(args))
 
-    assert rc == 0  # DeviceResponse status is still OK - verification failure is reported, not fatal
-    out = capsys.readouterr().out
-    assert "deviceAuth: deviceSignature INVALID" in out
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.err
+    assert "bad\\x1b[2J" in captured.err

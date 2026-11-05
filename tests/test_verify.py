@@ -27,6 +27,32 @@ def test_verify_cose_sign1_ecdsa_rejects_tampered_payload():
     assert verify_cose_sign1(cose_sign1, key.public_key()) is False
 
 
+def test_verify_cose_sign1_rejects_array_signature():
+    key = ec.generate_private_key(ec.SECP256R1())
+    cose_sign1 = build_cose_sign1(key, payload=b"hello mdoc")
+    cose_sign1[3] = [0] * 64
+    assert verify_cose_sign1(cose_sign1, key.public_key()) is False
+
+
+@pytest.mark.parametrize("header_index", [0, 1])
+def test_verify_cose_sign1_rejects_malformed_headers(header_index):
+    key = ec.generate_private_key(ec.SECP256R1())
+    cose_sign1 = build_cose_sign1(key, payload=b"hello mdoc")
+    cose_sign1[header_index] = []
+    assert verify_cose_sign1(cose_sign1, key.public_key()) is False
+
+
+def test_verify_cose_sign1_rejects_tagged_bignum_algorithm():
+    key = ec.generate_private_key(ec.SECP256R1())
+    payload = b"hello mdoc"
+    protected = cbor2.dumps({1: cbor2.CBORTag(3, b"\x06")})  # tag 3 decodes to ES256 (-7) by default
+    sig_structure = cbor2.dumps(["Signature1", protected, b"", payload])
+    signature = sign_es256_raw(key, sig_structure)
+
+    with pytest.raises(UnsupportedAlgorithm, match="algorithm must be an integer"):
+        verify_cose_sign1([protected, {}, payload, signature], key.public_key())
+
+
 def test_verify_cose_sign1_ecdsa_rejects_wrong_key():
     key = ec.generate_private_key(ec.SECP256R1())
     other_key = ec.generate_private_key(ec.SECP256R1())
@@ -52,6 +78,12 @@ def test_verify_cose_sign1_detached_payload():
     signature = sign_es256_raw(key, sig_structure)
     cose_sign1 = [protected, {}, None, signature]
     assert verify_cose_sign1(cose_sign1, key.public_key(), detached_payload=detached) is True
+
+
+def test_verify_cose_sign1_detached_payload_overrides_inline():
+    key = ec.generate_private_key(ec.SECP256R1())
+    cose_sign1 = build_cose_sign1(key, payload=b"historical payload")
+    assert verify_cose_sign1(cose_sign1, key.public_key(), detached_payload=b"fresh session payload") is False
 
 
 def test_verify_cose_sign1_raises_without_payload_or_detached():
@@ -83,9 +115,30 @@ def test_verify_cose_mac0_valid_and_invalid():
 
     cose_mac0 = [protected, {}, payload, tag]
     assert verify_cose_mac0(cose_mac0, mac_key) is True
+    assert verify_cose_mac0(cose_mac0, mac_key, detached_payload=b"fresh session payload") is False
+    malformed_cose_mac0 = [*cose_mac0[:3], [0] * 32]
+    assert verify_cose_mac0(malformed_cose_mac0, mac_key) is False
+    assert verify_cose_mac0([[], {}, payload, tag], mac_key) is False
+    assert verify_cose_mac0([protected, [], payload, tag], mac_key) is False
 
     wrong_key = b"\x22" * 32
     assert verify_cose_mac0(cose_mac0, wrong_key) is False
+
+
+def test_verify_cose_mac0_rejects_tagged_bignum_algorithm():
+    mac_key = b"\x11" * 32
+    payload = b"detached device auth content"
+    protected = cbor2.dumps({1: cbor2.CBORTag(2, b"\x05")})  # tag 2 decodes to HMAC 256/256 (5) by default
+    mac_struct = cbor2.dumps(["MAC0", protected, b"", payload])
+
+    from cryptography.hazmat.primitives import hmac as hmac_primitive
+
+    h = hmac_primitive.HMAC(mac_key, hashes.SHA256())
+    h.update(mac_struct)
+    tag = h.finalize()
+
+    with pytest.raises(UnsupportedAlgorithm, match="algorithm must be an integer"):
+        verify_cose_mac0([protected, {}, payload, tag], mac_key)
 
 
 def test_verify_cose_mac0_unsupported_alg_raises():

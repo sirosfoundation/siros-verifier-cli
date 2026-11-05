@@ -12,6 +12,9 @@ remains out of scope for this tool.
 
 from __future__ import annotations
 
+import io
+from collections.abc import Mapping
+
 import cbor2
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -46,25 +49,53 @@ def _sig_structure(context: str, protected_bytes: bytes, payload: bytes, externa
     return cbor2.dumps([context, protected_bytes, external_aad, payload])
 
 
-def _cose_alg(cose_struct: list) -> int:
+def _preserve_bignum_tag(tag: int):
+    def decode(value: bytes, _immutable: bool) -> cbor2.CBORTag:
+        integer = int.from_bytes(value, "big")
+        return cbor2.CBORTag(tag, integer if tag == 2 else -1 - integer)
+
+    return decode
+
+
+_BIGNUM_DECODERS = {2: _preserve_bignum_tag(2), 3: _preserve_bignum_tag(3)}
+
+
+def decode_cbor_item(data: bytes) -> tuple[object, int]:
+    """Decode one item while preserving tag 2/3 identity, returning bytes consumed."""
+    stream = io.BytesIO(data)
+    decoded = cbor2.CBORDecoder(stream, semantic_decoders=_BIGNUM_DECODERS).decode(immutable=False)
+    return decoded, stream.tell()
+
+
+def _cose_alg(cose_struct: list | tuple) -> int:
     protected_bytes, unprotected = cose_struct[0], cose_struct[1]
-    protected = cbor2.loads(protected_bytes) if protected_bytes else {}
+    if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, Mapping):
+        raise UnsupportedAlgorithm("invalid COSE header types")
+    protected, consumed = decode_cbor_item(protected_bytes) if protected_bytes else ({}, 0)
+    if consumed != len(protected_bytes):
+        raise UnsupportedAlgorithm("trailing data in COSE protected header")
+    if not isinstance(protected, Mapping):
+        raise UnsupportedAlgorithm("invalid COSE protected header")
     alg = protected.get(1, unprotected.get(1))
     if alg is None:
         raise UnsupportedAlgorithm("no alg (label 1) in COSE protected/unprotected header")
+    if type(alg) is not int:
+        raise UnsupportedAlgorithm("COSE algorithm must be an integer")
     return alg
 
 
 def verify_cose_sign1(
-    cose_sign1: list,
+    cose_sign1: list | tuple,
     public_key,
     detached_payload: bytes | None = None,
     external_aad: bytes = b"",
 ) -> bool:
     """Verify a COSE_Sign1 = [protected, unprotected, payload, signature].
     `detached_payload` is required when `payload` is null (as for DeviceAuth)."""
-    protected_bytes, _unprotected, payload, signature = cose_sign1
-    message_payload = payload if payload is not None else detached_payload
+    protected_bytes, unprotected, payload, signature = cose_sign1
+    if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, Mapping) or not isinstance(signature, bytes):
+        return False
+    message_payload = detached_payload if detached_payload is not None else payload
     if message_payload is None:
         raise UnsupportedAlgorithm("COSE_Sign1 payload is null and no detached content was supplied")
     alg = _cose_alg(cose_sign1)
@@ -98,15 +129,17 @@ def verify_cose_sign1(
 
 
 def verify_cose_mac0(
-    cose_mac0: list,
+    cose_mac0: list | tuple,
     mac_key: bytes,
     detached_payload: bytes | None = None,
     external_aad: bytes = b"",
 ) -> bool:
     """Verify a COSE_Mac0 = [protected, unprotected, payload, tag]. Only
     HMAC 256/256 (the only algorithm ISO 18013-5 §9.1.3.5 permits) is supported."""
-    protected_bytes, _unprotected, payload, tag = cose_mac0
-    message_payload = payload if payload is not None else detached_payload
+    protected_bytes, unprotected, payload, tag = cose_mac0
+    if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, Mapping) or not isinstance(tag, bytes):
+        return False
+    message_payload = detached_payload if detached_payload is not None else payload
     if message_payload is None:
         raise UnsupportedAlgorithm("COSE_Mac0 payload is null and no detached content was supplied")
     alg = _cose_alg(cose_mac0)

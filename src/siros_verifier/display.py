@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+from collections.abc import Mapping
 
 import cbor2
 
@@ -28,6 +29,25 @@ def _detect_image_kind(data: bytes) -> str | None:
     return None
 
 
+def _safe_text_atom(value: object) -> str:
+    if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):
+        text = f"integer 0x{value:x}" if value >= 0 else f"integer -0x{-value:x}"
+    else:
+        text = str(value)
+    return text.encode("unicode_escape").decode("ascii")
+
+
+def safe_text(value: object) -> str:
+    """Escape terminal controls in untrusted names and diagnostics."""
+    if isinstance(value, cbor2.CBORTag):
+        return f"#6.{value.tag}({safe_text(value.value)})"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(safe_text(item) for item in value) + "]"
+    if isinstance(value, Mapping):
+        return "{" + ", ".join(f"{safe_text(key)}: {safe_text(item)}" for key, item in value.items()) + "}"
+    return _safe_text_atom(value)
+
+
 def format_value(value: object) -> str:
     """One-line human-readable rendering of a decoded CBOR/mdoc value."""
     if isinstance(value, bytes):
@@ -41,11 +61,13 @@ def format_value(value: object) -> str:
         return value.isoformat()
     if isinstance(value, cbor2.CBORTag):
         return f"#6.{value.tag}({format_value(value.value)})"
-    if isinstance(value, dict):
-        inner = ", ".join(f"{k}: {format_value(v)}" for k, v in value.items())
+    if isinstance(value, Mapping):
+        inner = ", ".join(f"{safe_text(k)}: {format_value(v)}" for k, v in value.items())
         return "{" + inner + "}"
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(format_value(v) for v in value) + "]"
+    if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):
+        return f"integer 0x{value:x}" if value >= 0 else f"integer -0x{-value:x}"
     return repr(value)
 
 
@@ -60,10 +82,18 @@ def to_jsonable(value: object) -> object:
         return value.isoformat()
     if isinstance(value, cbor2.CBORTag):
         return {"tag": value.tag, "value": to_jsonable(value.value)}
-    if isinstance(value, dict):
-        return {str(k): to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, Mapping):
+        converted = {}
+        for key, item in value.items():
+            json_key = key if isinstance(key, str) else safe_text(key)
+            if json_key in converted:
+                return {"entries": [{"key": to_jsonable(k), "value": to_jsonable(v)} for k, v in value.items()]}
+            converted[json_key] = to_jsonable(item)
+        return converted
     if isinstance(value, (list, tuple)):
         return [to_jsonable(v) for v in value]
+    if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):
+        return {"integer_hex": format(value, "x") if value >= 0 else "-" + format(-value, "x")}
     return value
 
 
