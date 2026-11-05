@@ -34,6 +34,10 @@ def safe_text(value: object) -> str:
         text = f"integer 0x{value:x}" if value >= 0 else f"integer -0x{-value:x}"
     elif isinstance(value, cbor2.CBORTag):
         text = f"#6.{value.tag}({safe_text(value.value)})"
+    elif isinstance(value, (list, tuple)):
+        text = "[" + ", ".join(safe_text(item) for item in value) + "]"
+    elif isinstance(value, dict):
+        text = "{" + ", ".join(f"{safe_text(key)}: {safe_text(item)}" for key, item in value.items()) + "}"
     else:
         text = str(value)
     return text.encode("unicode_escape").decode("ascii")

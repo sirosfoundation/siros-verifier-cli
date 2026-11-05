@@ -1,5 +1,6 @@
 import json
 
+import cbor2
 import pytest
 from test_mdoc import validatable_response
 
@@ -43,6 +44,17 @@ def test_huge_integer_map_keys_render_in_text_and_json():
     assert "0x" in text
     key = next(iter(json_value))
     assert "0x" in key
+
+
+@pytest.mark.parametrize("tag", [2, 3])
+def test_compound_bignum_map_keys_render_in_text_and_json(tag):
+    key = (cbor2.CBORTag(tag, 1 << 20000),)
+
+    text = display.format_value({key: "value"})
+    json_text = display.to_json(display.to_jsonable({key: "value"}))
+
+    assert "0x" in text
+    assert "0x" in json_text
 
 
 def test_late_rendering_failure_emits_no_partial_claims(capsys):
