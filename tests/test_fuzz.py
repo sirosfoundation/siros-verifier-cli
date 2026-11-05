@@ -194,6 +194,27 @@ def test_fuzz_truncated_session_establishment_reports_expected_status(wallet_eng
     assert "expected/correct response" in err
 
 
+def test_fuzz_escapes_session_data_status(wallet_engagement, monkeypatch, capsys):
+    _device_priv, _de_bytes, mdoc_uri = wallet_engagement
+
+    async def fake_exchange(*args, **kwargs):
+        return ble.ExchangeResult(
+            session_data_bytes=cbor2.dumps({"status": "bad\x1b[2J"}),
+            negotiated_mtu=185,
+            chunk_size=182,
+            device_address="AA:BB:CC:DD:EE:FF",
+        )
+
+    monkeypatch.setattr(ble, "exchange", fake_exchange)
+    args = cli.build_parser().parse_args(["fuzz", mdoc_uri, fuzz.Scenario.GARBAGE_CBOR_REQUEST.value])
+    rc = asyncio.run(cli.run_fuzz(args))
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.err
+    assert "bad\\x1b[2J" in captured.err
+
+
 def test_fuzz_rejects_central_client_mode():
     """Central-client-mode scenarios (this tool as GATT peripheral) aren't
     implemented yet - --mode central shouldn't even be an accepted choice."""
