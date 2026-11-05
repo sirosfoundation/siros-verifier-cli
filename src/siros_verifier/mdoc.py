@@ -368,19 +368,22 @@ def validate_device_response(
             if mso.doc_type != doc.doc_type:
                 errors.append(f"{prefix}: doc_type_mismatch")
 
-            validity = {
-                name: _aware_datetime(mso.validity_info.get(name)) for name in ("signed", "validFrom", "validUntil")
-            }
-            if any(value is None for value in validity.values()):
+            if not isinstance(mso.validity_info, dict):
                 errors.append(f"{prefix}: validity_info")
             else:
-                valid_from = validity["validFrom"]
-                valid_until = validity["validUntil"]
-                assert valid_from is not None and valid_until is not None
-                if current_time < valid_from:
-                    errors.append(f"{prefix}: not_yet_valid")
-                if current_time >= valid_until:
-                    errors.append(f"{prefix}: expired")
+                validity = {
+                    name: _aware_datetime(mso.validity_info.get(name)) for name in ("signed", "validFrom", "validUntil")
+                }
+                if any(value is None for value in validity.values()):
+                    errors.append(f"{prefix}: validity_info")
+                else:
+                    valid_from = validity["validFrom"]
+                    valid_until = validity["validUntil"]
+                    assert valid_from is not None and valid_until is not None
+                    if current_time < valid_from:
+                        errors.append(f"{prefix}: not_yet_valid")
+                    if current_time >= valid_until:
+                        errors.append(f"{prefix}: expired")
 
         for namespace, elements in doc.namespaces.items():
             for element in elements:

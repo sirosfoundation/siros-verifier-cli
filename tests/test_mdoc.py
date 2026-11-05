@@ -199,6 +199,12 @@ def test_validate_device_response_enforces_mso_validity(field, value, code):
     assert any(code in error for error in validation_errors(result))
 
 
+def test_validate_device_response_rejects_non_map_validity_info():
+    result = validatable_response()
+    result.documents[0].issuer_auth.mso.validity_info = []
+    assert any("validity_info" in error for error in validation_errors(result))
+
+
 def test_validate_device_response_enforces_mso_document_type():
     result = validatable_response()
     result.documents[0].issuer_auth.mso.doc_type = "example.other"
