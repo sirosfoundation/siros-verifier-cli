@@ -29,19 +29,23 @@ def _detect_image_kind(data: bytes) -> str | None:
     return None
 
 
-def safe_text(value: object) -> str:
-    """Escape terminal controls in untrusted names and diagnostics."""
+def _safe_text_atom(value: object) -> str:
     if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):
         text = f"integer 0x{value:x}" if value >= 0 else f"integer -0x{-value:x}"
-    elif isinstance(value, cbor2.CBORTag):
-        text = f"#6.{value.tag}({safe_text(value.value)})"
-    elif isinstance(value, (list, tuple)):
-        text = "[" + ", ".join(safe_text(item) for item in value) + "]"
-    elif isinstance(value, Mapping):
-        text = "{" + ", ".join(f"{safe_text(key)}: {safe_text(item)}" for key, item in value.items()) + "}"
     else:
         text = str(value)
     return text.encode("unicode_escape").decode("ascii")
+
+
+def safe_text(value: object) -> str:
+    """Escape terminal controls in untrusted names and diagnostics."""
+    if isinstance(value, cbor2.CBORTag):
+        return f"#6.{value.tag}({safe_text(value.value)})"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(safe_text(item) for item in value) + "]"
+    if isinstance(value, Mapping):
+        return "{" + ", ".join(f"{safe_text(key)}: {safe_text(item)}" for key, item in value.items()) + "}"
+    return _safe_text_atom(value)
 
 
 def format_value(value: object) -> str:
