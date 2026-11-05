@@ -5,6 +5,7 @@ import base64
 import datetime
 import gzip
 import hashlib
+import ipaddress
 import json
 import threading
 import time
@@ -87,6 +88,13 @@ def test_issuer_id_converts_http_uri_to_https():
 
 def test_issuer_id_uses_first_non_wildcard_dns_san():
     der = make_certificate([x509.DNSName("*.example"), x509.DNSName("issuer.example")])
+    assert trust.mdoc_issuer_id(der) == "https://issuer.example"
+
+
+def test_issuer_id_skips_binary_ip_sans():
+    der = make_certificate(
+        [x509.IPAddress(ipaddress.IPv4Address("192.0.2.1")), x509.DNSName("issuer.example")]
+    )
     assert trust.mdoc_issuer_id(der) == "https://issuer.example"
 
 

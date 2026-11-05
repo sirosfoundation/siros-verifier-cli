@@ -53,6 +53,7 @@ def make_signed_document(
     device_auth_method: str = "signature",
     e_reader_pub: ec.EllipticCurvePublicKey | None = None,
     device_namespaces: object = None,
+    device_namespaces_tagged: bool = True,
     additional_device_auth: dict | None = None,
     errors: object = None,
 ) -> dict:
@@ -93,7 +94,8 @@ def make_signed_document(
     issuer_sig_structure = cbor2.dumps(["Signature1", protected, b"", mso_payload])
     issuer_auth = [protected, {33: cert_der}, mso_payload, sign_es256_raw(ds_priv, issuer_sig_structure)]
 
-    device_namespaces_tag = tagged24(device_namespaces if device_namespaces is not None else {})
+    raw_device_namespaces = device_namespaces if device_namespaces is not None else {}
+    device_namespaces_tag = tagged24(raw_device_namespaces) if device_namespaces_tagged else raw_device_namespaces
     replay_inline = replay_inline_device_signature or replay_inline_device_auth
     signing_transcript_bytes = session_transcript_bytes
     if replay_inline:
@@ -243,6 +245,8 @@ def test_read_end_to_end_rejects_invalid_device_auth(wallet_engagement, monkeypa
         ({"errors": {"org.iso.18013.5.1": {"other": []}}}, "invalid_errors"),
         ({"errors": {"org.iso.18013.5.1": {"other": 1 << 20000}}}, "invalid_errors"),
         ({"device_namespaces": []}, "device_namespaces_unsupported"),
+        ({"device_namespaces": [], "device_namespaces_tagged": False}, "malformed DeviceResponse"),
+        ({"device_namespaces": {}, "device_namespaces_tagged": False}, "malformed DeviceResponse"),
         ({"additional_device_auth": {"deviceMac": [b"", {}, None, b""]}}, "device_auth_not_valid"),
     ],
 )
@@ -261,6 +265,24 @@ def test_read_rejects_unsafe_response_content(
     assert expected_error in captured.err
     assert "given_name" not in captured.out
     assert "family_name" not in captured.out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_read_escapes_validation_diagnostics(wallet_engagement, monkeypatch, capsys, json_output):
+    device_priv, de_bytes, mdoc_uri = wallet_engagement
+    monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes))
+    monkeypatch.setattr(cli.mdoc, "validate_device_response", lambda *args, **kwargs: ["bad\x1b[31m\nforged"])
+    argv = ["read", mdoc_uri] + (["--json"] if json_output else [])
+    args = cli.build_parser().parse_args(argv)
+
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.err
+    assert "\nforged" not in captured.err
+    assert "bad\\x1b[31m\\nforged" in captured.err
+    assert "given_name" not in captured.out
 
 
 def test_read_releases_claims_after_explicit_pdp_permit(wallet_engagement, monkeypatch, capsys):

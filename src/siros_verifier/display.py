@@ -28,6 +28,11 @@ def _detect_image_kind(data: bytes) -> str | None:
     return None
 
 
+def safe_text(value: object) -> str:
+    """Escape terminal controls in untrusted names and diagnostics."""
+    return str(value).encode("unicode_escape").decode("ascii")
+
+
 def format_value(value: object) -> str:
     """One-line human-readable rendering of a decoded CBOR/mdoc value."""
     if isinstance(value, bytes):
@@ -42,10 +47,12 @@ def format_value(value: object) -> str:
     if isinstance(value, cbor2.CBORTag):
         return f"#6.{value.tag}({format_value(value.value)})"
     if isinstance(value, dict):
-        inner = ", ".join(f"{k}: {format_value(v)}" for k, v in value.items())
+        inner = ", ".join(f"{safe_text(k)}: {format_value(v)}" for k, v in value.items())
         return "{" + inner + "}"
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(format_value(v) for v in value) + "]"
+    if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):
+        return f"integer 0x{value:x}" if value >= 0 else f"integer -0x{-value:x}"
     return repr(value)
 
 
@@ -68,6 +75,8 @@ def to_jsonable(value: object) -> object:
         return {str(k): to_jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [to_jsonable(v) for v in value]
+    if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):
+        return {"integer_hex": format(value, "x") if value >= 0 else "-" + format(-value, "x")}
     return value
 
 

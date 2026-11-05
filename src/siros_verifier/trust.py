@@ -107,13 +107,15 @@ def mdoc_issuer_id(leaf_der: bytes) -> str:
 
             dns_name: str | None = None
             for name in san:
+                if name.name not in {"uniform_resource_identifier", "dns_name"}:
+                    continue
                 value = name.contents.decode("ascii")
                 if name.name == "uniform_resource_identifier":
                     if value.startswith("http://"):
                         return "https://" + value.removeprefix("http://")
                     if value.startswith("https://"):
                         return value
-                elif name.name == "dns_name" and dns_name is None and not value.startswith("*."):
+                elif dns_name is None and not value.startswith("*."):
                     dns_name = value
         except (TypeError, ValueError):
             return _hash_issuer_id(leaf_der)
