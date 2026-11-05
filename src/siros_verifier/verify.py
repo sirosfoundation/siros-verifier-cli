@@ -12,6 +12,8 @@ evaluation is delegated to go-trust, never decided by this module.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import cbor2
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -48,10 +50,16 @@ def _sig_structure(context: str, protected_bytes: bytes, payload: bytes, externa
 
 def _cose_alg(cose_struct: list | tuple) -> int:
     protected_bytes, unprotected = cose_struct[0], cose_struct[1]
+    if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, Mapping):
+        raise UnsupportedAlgorithm("invalid COSE header types")
     protected = cbor2.loads(protected_bytes) if protected_bytes else {}
+    if not isinstance(protected, Mapping):
+        raise UnsupportedAlgorithm("invalid COSE protected header")
     alg = protected.get(1, unprotected.get(1))
     if alg is None:
         raise UnsupportedAlgorithm("no alg (label 1) in COSE protected/unprotected header")
+    if type(alg) is not int:
+        raise UnsupportedAlgorithm("COSE algorithm must be an integer")
     return alg
 
 
@@ -63,8 +71,8 @@ def verify_cose_sign1(
 ) -> bool:
     """Verify a COSE_Sign1 = [protected, unprotected, payload, signature].
     `detached_payload` is required when `payload` is null (as for DeviceAuth)."""
-    protected_bytes, _unprotected, payload, signature = cose_sign1
-    if not isinstance(signature, bytes):
+    protected_bytes, unprotected, payload, signature = cose_sign1
+    if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, Mapping) or not isinstance(signature, bytes):
         return False
     message_payload = detached_payload if detached_payload is not None else payload
     if message_payload is None:
@@ -107,8 +115,8 @@ def verify_cose_mac0(
 ) -> bool:
     """Verify a COSE_Mac0 = [protected, unprotected, payload, tag]. Only
     HMAC 256/256 (the only algorithm ISO 18013-5 §9.1.3.5 permits) is supported."""
-    protected_bytes, _unprotected, payload, tag = cose_mac0
-    if not isinstance(tag, bytes):
+    protected_bytes, unprotected, payload, tag = cose_mac0
+    if not isinstance(protected_bytes, bytes) or not isinstance(unprotected, Mapping) or not isinstance(tag, bytes):
         return False
     message_payload = detached_payload if detached_payload is not None else payload
     if message_payload is None:

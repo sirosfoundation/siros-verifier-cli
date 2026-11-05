@@ -34,6 +34,14 @@ def test_verify_cose_sign1_rejects_array_signature():
     assert verify_cose_sign1(cose_sign1, key.public_key()) is False
 
 
+@pytest.mark.parametrize("header_index", [0, 1])
+def test_verify_cose_sign1_rejects_malformed_headers(header_index):
+    key = ec.generate_private_key(ec.SECP256R1())
+    cose_sign1 = build_cose_sign1(key, payload=b"hello mdoc")
+    cose_sign1[header_index] = []
+    assert verify_cose_sign1(cose_sign1, key.public_key()) is False
+
+
 def test_verify_cose_sign1_ecdsa_rejects_wrong_key():
     key = ec.generate_private_key(ec.SECP256R1())
     other_key = ec.generate_private_key(ec.SECP256R1())
@@ -97,8 +105,10 @@ def test_verify_cose_mac0_valid_and_invalid():
     cose_mac0 = [protected, {}, payload, tag]
     assert verify_cose_mac0(cose_mac0, mac_key) is True
     assert verify_cose_mac0(cose_mac0, mac_key, detached_payload=b"fresh session payload") is False
-    cose_mac0[3] = [0] * 32
-    assert verify_cose_mac0(cose_mac0, mac_key) is False
+    malformed_cose_mac0 = [*cose_mac0[:3], [0] * 32]
+    assert verify_cose_mac0(malformed_cose_mac0, mac_key) is False
+    assert verify_cose_mac0([[], {}, payload, tag], mac_key) is False
+    assert verify_cose_mac0([protected, [], payload, tag], mac_key) is False
 
     wrong_key = b"\x22" * 32
     assert verify_cose_mac0(cose_mac0, wrong_key) is False
