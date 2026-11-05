@@ -24,6 +24,19 @@ def _engagement(*, peripheral: bool, central: bool) -> DeviceEngagement:
     )
 
 
+def test_print_engagement_escapes_metadata(capsys):
+    de = _engagement(peripheral=True, central=False)
+    de.version = "bad\x1b[2J"
+    de.cipher_suite = "bad\x1b]0;title\x07"
+
+    cli.print_engagement(de)
+
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "bad\\x1b[2J" in out
+    assert "bad\\x1b]0;title\\x07" in out
+
+
 def test_resolve_mode_auto_prefers_peripheral_when_both_offered():
     de = _engagement(peripheral=True, central=True)
     assert cli._resolve_mode("auto", de) is True

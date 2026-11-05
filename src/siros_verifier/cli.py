@@ -133,8 +133,8 @@ def cmd_engagement_decode(args: argparse.Namespace) -> int:
 
 
 def print_engagement(de: DeviceEngagement) -> None:
-    print(f"version: {de.version}")
-    print(f"cipher suite: {de.cipher_suite}")
+    print(f"version: {_safe_diagnostic(de.version)}")
+    print(f"cipher suite: {_safe_diagnostic(de.cipher_suite)}")
     numbers = de.e_device_key_pub.public_numbers()
     print(f"EDeviceKey.Pub: x={numbers.x:064x} y={numbers.y:064x}")
     print(f"peripheral server mode UUID: {de.peripheral_server_uuid or '(not offered)'}")

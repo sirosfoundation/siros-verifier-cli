@@ -30,7 +30,13 @@ def _detect_image_kind(data: bytes) -> str | None:
 
 def safe_text(value: object) -> str:
     """Escape terminal controls in untrusted names and diagnostics."""
-    return str(value).encode("unicode_escape").decode("ascii")
+    if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):
+        text = f"integer 0x{value:x}" if value >= 0 else f"integer -0x{-value:x}"
+    elif isinstance(value, cbor2.CBORTag):
+        text = f"#6.{value.tag}({safe_text(value.value)})"
+    else:
+        text = str(value)
+    return text.encode("unicode_escape").decode("ascii")
 
 
 def format_value(value: object) -> str:
@@ -68,7 +74,7 @@ def to_jsonable(value: object) -> object:
     if isinstance(value, cbor2.CBORTag):
         return {"tag": value.tag, "value": to_jsonable(value.value)}
     if isinstance(value, dict):
-        return {str(k): to_jsonable(v) for k, v in value.items()}
+        return {safe_text(k): to_jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [to_jsonable(v) for v in value]
     if isinstance(value, int) and not -(1 << 64) <= value < (1 << 64):

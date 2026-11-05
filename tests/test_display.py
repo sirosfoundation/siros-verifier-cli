@@ -34,6 +34,17 @@ def test_huge_integer_values_render_without_decimal_conversion(capsys):
     assert values[-1]["value"]["integer_hex"] is not None
 
 
+def test_huge_integer_map_keys_render_in_text_and_json():
+    value = {1 << 20000: "value"}
+
+    text = display.format_value(value)
+    json_value = display.to_jsonable(value)
+
+    assert "0x" in text
+    key = next(iter(json_value))
+    assert "0x" in key
+
+
 def test_late_rendering_failure_emits_no_partial_claims(capsys):
     class FailingRepr:
         def __repr__(self):
