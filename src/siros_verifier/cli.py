@@ -238,11 +238,18 @@ async def run_read(args: argparse.Namespace) -> int:
     for doc in response.documents:
         doc.device_auth_valid = mdoc.verify_device_auth(doc, session_transcript, e_reader_priv)
 
+    validation_errors = mdoc.validate_device_response(response, doc_requests)
+    if validation_errors:
+        print("error: DeviceResponse verification failed; no claims released:", file=sys.stderr)
+        for error in validation_errors:
+            print(f"  - {error}", file=sys.stderr)
+        return 1
+
     if args.json:
         print(display.to_json(response))
     else:
         print_device_response(response)
-    return 0 if response.status == 0 else 1
+    return 0
 
 
 def _require_peripheral_mode(de: DeviceEngagement, mode: str) -> None:

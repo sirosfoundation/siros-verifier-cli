@@ -42,7 +42,7 @@ Return SessionData       ─────────────▶  Decrypt & v
 3. **Session keys** - derive `SKReader`/`SKDevice` via HKDF-SHA256 over the `SessionTranscript`
 4. **BLE transport** - either scan for the peripheral-server-mode UUID and connect as GATT central, or advertise the central-client-mode UUID as a GATT peripheral and wait for the mdoc to connect - whichever the engagement offers
 5. **Request** - encrypt a `DeviceRequest` (AES-256-GCM) for one or more docType/namespace/claims
-6. **Response** - decrypt the `DeviceResponse`; verify `IssuerAuth` (COSE_Sign1), per-element MSO digests, and `DeviceAuth` (COSE_Sign1/COSE_Mac0); display everything
+6. **Response** - decrypt the `DeviceResponse`; verify `IssuerAuth` (COSE_Sign1), per-element MSO digests, `DeviceAuth` (COSE_Sign1/COSE_Mac0), MSO validity, and the requested document/claims; display claims only when every check passes
 
 In central client mode the transport is reversed - this tool advertises and
 serves a GATT service (Table 6: `State`/`Client2Server`/`Server2Client`, plus
@@ -144,6 +144,9 @@ echo 'some text' | siros-verify qr show     # also reads from stdin
 - ✅ IssuerAuth (COSE_Sign1) signature - verified against the x5chain leaf certificate's public key
 - ✅ Per-element digests - recomputed and checked against the MSO's `valueDigests`
 - ✅ DeviceAuth (`deviceSignature`/`deviceMac`) - verified against the MSO's `deviceKey` (needs the reader's own ephemeral key + SessionTranscript, so this runs after parsing)
+- ✅ MSO validity period and document/MSO docType consistency - enforced before disclosure
+- ✅ Request policy - every requested document type, namespace, and element is required; unrequested document types are rejected; extra valid claims are allowed
+- ✅ Fail-closed disclosure - any response-status, cryptographic, validity, or request-policy failure exits nonzero without printing claims
 - ✅ Per-document and per-element error codes (Table 8/9/15/20 of ISO 18013-5)
 - ✅ Both BLE retrieval methods (mdoc peripheral server mode via `bleak`, mdoc central client mode via `bless`) - central client mode is protocol-complete but **UNVERIFIED ON REAL HARDWARE**
 - ❌ Certificate chain / IACA trust anchor validation - **not done, ever**

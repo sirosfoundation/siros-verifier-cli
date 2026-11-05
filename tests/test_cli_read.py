@@ -43,22 +43,34 @@ def wallet_engagement():
 
 
 def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "Alice", tamper_device_signature: bool = False) -> dict:
-    now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
 
-    issuer_signed_item = tagged24(
-        {"digestID": 1, "random": b"\x00" * 16, "elementIdentifier": "given_name", "elementValue": given_name}
-    )
-    item_digest = hashes.Hash(hashes.SHA256())
-    item_digest.update(cbor2.dumps(issuer_signed_item))
+    issuer_signed_items = [
+        tagged24(
+            {"digestID": 1, "random": b"\x00" * 16, "elementIdentifier": "given_name", "elementValue": given_name}
+        ),
+        tagged24(
+            {"digestID": 2, "random": b"\x01" * 16, "elementIdentifier": "family_name", "elementValue": "Smith"}
+        ),
+    ]
+    value_digests = {}
+    for item in issuer_signed_items:
+        item_digest = hashes.Hash(hashes.SHA256())
+        item_digest.update(cbor2.dumps(item))
+        value_digests[cbor2.loads(item.value)["digestID"]] = item_digest.finalize()
 
     device_key_priv = ec.generate_private_key(ec.SECP256R1())  # SDeviceKey, distinct from EDeviceKey
     mso = {
         "version": "1.0",
         "digestAlgorithm": "SHA-256",
-        "valueDigests": {"org.iso.18013.5.1": {1: item_digest.finalize()}},
+        "valueDigests": {"org.iso.18013.5.1": value_digests},
         "deviceKeyInfo": {"deviceKey": cose_key_from_public_key(device_key_priv.public_key())},
         "docType": DOC_TYPE,
-        "validityInfo": {"signed": now, "validFrom": now, "validUntil": now + datetime.timedelta(days=1)},
+        "validityInfo": {
+            "signed": now,
+            "validFrom": now - datetime.timedelta(minutes=1),
+            "validUntil": now + datetime.timedelta(days=1),
+        },
     }
     mso_payload = cbor2.dumps(tagged24(mso))
 
@@ -89,7 +101,7 @@ def make_signed_document(session_transcript_bytes: bytes, *, given_name: str = "
 
     return {
         "docType": DOC_TYPE,
-        "issuerSigned": {"nameSpaces": {"org.iso.18013.5.1": [issuer_signed_item]}, "issuerAuth": issuer_auth},
+        "issuerSigned": {"nameSpaces": {"org.iso.18013.5.1": issuer_signed_items}, "issuerAuth": issuer_auth},
         "deviceSigned": {"nameSpaces": device_namespaces_tag, "deviceAuth": device_auth},
     }
 
@@ -170,13 +182,15 @@ def test_read_dump_cbor_does_not_retain_response(wallet_engagement, monkeypatch,
     assert "SessionData/DeviceResponse dumps are disabled" in captured.err
 
 
-def test_read_end_to_end_detects_tampered_device_signature(wallet_engagement, monkeypatch, capsys):
+def test_read_end_to_end_rejects_tampered_device_signature(wallet_engagement, monkeypatch, capsys):
     device_priv, de_bytes, mdoc_uri = wallet_engagement
     monkeypatch.setattr(ble, "exchange", make_fake_exchange(device_priv, de_bytes, tamper_device_signature=True))
 
     args = cli.build_parser().parse_args(["read", mdoc_uri])
     rc = asyncio.run(cli.run_read(args))
 
-    assert rc == 0  # DeviceResponse status is still OK - verification failure is reported, not fatal
-    out = capsys.readouterr().out
-    assert "deviceAuth: deviceSignature INVALID" in out
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "device_auth_not_valid" in captured.err
+    assert "given_name =" not in captured.out
+    assert "family_name =" not in captured.out

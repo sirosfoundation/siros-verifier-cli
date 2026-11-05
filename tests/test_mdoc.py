@@ -1,15 +1,18 @@
 import datetime
 
 import cbor2
+import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from helpers import cose_key_from_public_key, make_self_signed_cert_der, sign_es256_raw, tagged24
 
 from siros_verifier.mdoc import (
     DocRequest,
+    ParsedElement,
     build_device_request,
     build_session_establishment,
     parse_device_response,
+    validate_device_response,
 )
 
 GIVEN_NAME_ITEM = {"digestID": 1, "random": b"\x01" * 16, "elementIdentifier": "given_name", "elementValue": "Alice"}
@@ -129,3 +132,83 @@ def test_parse_device_response_status_error_has_no_documents():
     assert result.status == 10
     assert result.status_name == "General error"
     assert result.documents == []
+
+
+VALIDATION_NOW = datetime.datetime(2024, 1, 15, tzinfo=datetime.timezone.utc)
+MDOC_REQUEST = DocRequest(doc_type="org.iso.18013.5.1.mDL", namespaces={"org.iso.18013.5.1": ["given_name"]})
+
+
+def validatable_response(**kwargs):
+    result = parse_device_response(build_device_response_bytes(**kwargs))
+    result.documents[0].device_auth_valid = True
+    return result
+
+
+def validation_errors(result, requests=None):
+    return validate_device_response(result, requests or [MDOC_REQUEST], now=VALIDATION_NOW)
+
+
+def test_validate_device_response_accepts_valid_requested_claims():
+    assert validation_errors(validatable_response()) == []
+
+
+def test_validate_device_response_allows_additional_valid_claims():
+    result = validatable_response()
+    result.documents[0].namespaces["org.iso.18013.5.1"].append(
+        ParsedElement(identifier="extra_claim", value="allowed", digest_id=2, digest_valid=True)
+    )
+    assert validation_errors(result) == []
+
+
+@pytest.mark.parametrize("failure", ["issuer", "digest", "device"])
+def test_validate_device_response_rejects_cryptographic_failures(failure):
+    result = validatable_response()
+    if failure == "issuer":
+        result.documents[0].issuer_auth.signature_valid = False
+    elif failure == "digest":
+        result.documents[0].namespaces["org.iso.18013.5.1"][0].digest_valid = None
+    else:
+        result.documents[0].device_auth_valid = None
+    assert validation_errors(result)
+
+
+def test_validate_device_response_requires_every_requested_element():
+    request = DocRequest(doc_type="org.iso.18013.5.1.mDL", namespaces={"org.iso.18013.5.1": ["family_name"]})
+    errors = validation_errors(validatable_response(), [request])
+    assert any("requested_element_missing" in error for error in errors)
+
+
+def test_validate_device_response_rejects_unrequested_document_type():
+    request = DocRequest(doc_type="example.other", namespaces={"example": ["claim"]})
+    errors = validation_errors(validatable_response(), [request])
+    assert any("requested_doc_type_missing" in error for error in errors)
+    assert any("doc_type_not_requested" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("validFrom", datetime.datetime(2024, 1, 20, tzinfo=datetime.timezone.utc), "not_yet_valid"),
+        ("validUntil", datetime.datetime(2024, 1, 14, tzinfo=datetime.timezone.utc), "expired"),
+        ("signed", None, "validity_info"),
+    ],
+)
+def test_validate_device_response_enforces_mso_validity(field, value, code):
+    result = validatable_response()
+    result.documents[0].issuer_auth.mso.validity_info[field] = value
+    assert any(code in error for error in validation_errors(result))
+
+
+def test_validate_device_response_enforces_mso_document_type():
+    result = validatable_response()
+    result.documents[0].issuer_auth.mso.doc_type = "example.other"
+    assert any("doc_type_mismatch" in error for error in validation_errors(result))
+
+
+def test_validate_device_response_enforces_envelope():
+    result = validatable_response()
+    result.version = "2.0"
+    result.status = 10
+    errors = validation_errors(result)
+    assert "unsupported_version" in errors
+    assert "response_status_not_ok" in errors

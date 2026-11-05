@@ -15,7 +15,7 @@ here means "internally consistent with the presented key", not "trustworthy".
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 import cbor2
 from cryptography import x509
@@ -180,7 +180,7 @@ class ParsedDocument:
 @dataclass
 class DeviceResponseResult:
     version: str | None
-    status: int
+    status: int | None
     status_name: str
     documents: list[ParsedDocument]
     document_errors: list[dict]
@@ -296,7 +296,7 @@ def verify_device_auth(
 
 def parse_device_response(plaintext: bytes) -> DeviceResponseResult:
     device_response = cbor2.loads(plaintext)
-    status = device_response.get("status", 0)
+    status = device_response.get("status")
     documents = [_parse_document(doc) for doc in device_response.get("documents", [])]
     return DeviceResponseResult(
         version=device_response.get("version"),
@@ -305,3 +305,91 @@ def parse_device_response(plaintext: bytes) -> DeviceResponseResult:
         documents=documents,
         document_errors=device_response.get("documentErrors", []),
     )
+
+
+def _aware_datetime(value: object) -> datetime | None:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        return None
+    return value
+
+
+def validate_device_response(
+    response: DeviceResponseResult, doc_requests: list[DocRequest], *, now: datetime | None = None
+) -> list[str]:
+    """Return request/cryptographic validation failures; an empty list permits disclosure.
+
+    Every requested document type, namespace, and element is required. Unrequested
+    document types are rejected, while additional valid disclosed claims are allowed.
+    No certificate-chain or authorization decision is made here.
+    """
+    errors: list[str] = []
+    if response.version != "1.0":
+        errors.append("unsupported_version")
+    if response.status != 0:
+        errors.append("response_status_not_ok")
+    if not response.documents:
+        errors.append("document_count")
+
+    for requested in doc_requests:
+        if not any(doc.doc_type == requested.doc_type for doc in response.documents):
+            errors.append(f"requested_doc_type_missing: {requested.doc_type}")
+
+    current_time = now or datetime.now(timezone.utc)
+    if _aware_datetime(current_time) is None:
+        raise ValueError("now must be timezone-aware")
+
+    for index, doc in enumerate(response.documents):
+        prefix = f"document {index} ({doc.doc_type})"
+        matching_requests = [request for request in doc_requests if request.doc_type == doc.doc_type]
+        if not matching_requests:
+            errors.append(f"{prefix}: doc_type_not_requested")
+
+        issuer_auth = doc.issuer_auth
+        if issuer_auth is None:
+            errors.append(f"{prefix}: issuer_auth_missing")
+        elif issuer_auth.signature_valid is not True:
+            errors.append(f"{prefix}: issuer_signature_not_valid")
+
+        mso = issuer_auth.mso if issuer_auth else None
+        if mso is None:
+            errors.append(f"{prefix}: mso_missing")
+        else:
+            if mso.version != "1.0":
+                errors.append(f"{prefix}: mso_version")
+            if mso.doc_type != doc.doc_type:
+                errors.append(f"{prefix}: doc_type_mismatch")
+
+            validity = {
+                name: _aware_datetime(mso.validity_info.get(name)) for name in ("signed", "validFrom", "validUntil")
+            }
+            if any(value is None for value in validity.values()):
+                errors.append(f"{prefix}: validity_info")
+            else:
+                valid_from = validity["validFrom"]
+                valid_until = validity["validUntil"]
+                assert valid_from is not None and valid_until is not None
+                if current_time < valid_from:
+                    errors.append(f"{prefix}: not_yet_valid")
+                if current_time >= valid_until:
+                    errors.append(f"{prefix}: expired")
+
+        for namespace, elements in doc.namespaces.items():
+            for element in elements:
+                if element.digest_valid is not True:
+                    errors.append(f"{prefix}: element_digest_not_valid: {namespace}.{element.identifier}")
+
+        if doc.device_auth_valid is not True:
+            errors.append(f"{prefix}: device_auth_not_valid")
+
+        for requested in matching_requests:
+            for namespace, requested_elements in requested.namespaces.items():
+                disclosed_elements = doc.namespaces.get(namespace)
+                if disclosed_elements is None:
+                    errors.append(f"{prefix}: requested_namespace_missing: {namespace}")
+                    continue
+                disclosed = {element.identifier for element in disclosed_elements}
+                for identifier in requested_elements:
+                    if identifier not in disclosed:
+                        errors.append(f"{prefix}: requested_element_missing: {namespace}.{identifier}")
+
+    return errors
