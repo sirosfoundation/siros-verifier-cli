@@ -450,41 +450,17 @@ def test_read_accepts_detached_device_mac_and_requests_permit(wallet_engagement,
 
 
 @pytest.mark.parametrize("json_output", [False, True])
-def test_read_rejects_inline_historical_device_mac_before_pdp(
-    wallet_engagement, monkeypatch, capsys, json_output
-):
+@pytest.mark.parametrize(
+    "document_kwargs",
+    [{"replay_inline_device_auth": True}, {"tamper_device_mac": True}],
+    ids=["historical-inline", "tampered"],
+)
+def test_read_rejects_invalid_device_mac_before_pdp(wallet_engagement, monkeypatch, capsys, json_output, document_kwargs):
     device_priv, de_bytes, mdoc_uri = wallet_engagement
     monkeypatch.setattr(
         ble,
         "exchange",
-        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", replay_inline_device_auth=True),
-    )
-    pdp_called = False
-
-    async def unexpected_pdp(*args):
-        nonlocal pdp_called
-        pdp_called = True
-
-    monkeypatch.setattr(cli.trust, "authorize_documents", unexpected_pdp)
-    argv = ["read", mdoc_uri, "--pdp-url", "https://pdp.example/evaluation"] + (["--json"] if json_output else [])
-    args = cli.build_parser().parse_args(argv)
-    rc = asyncio.run(cli.run_read(args))
-
-    assert rc == 1
-    assert pdp_called is False
-    captured = capsys.readouterr()
-    assert "device_auth_not_valid" in captured.err
-    assert "given_name" not in captured.out
-    assert "family_name" not in captured.out
-
-
-@pytest.mark.parametrize("json_output", [False, True])
-def test_read_rejects_tampered_device_mac_before_pdp(wallet_engagement, monkeypatch, capsys, json_output):
-    device_priv, de_bytes, mdoc_uri = wallet_engagement
-    monkeypatch.setattr(
-        ble,
-        "exchange",
-        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", tamper_device_mac=True),
+        make_fake_exchange(device_priv, de_bytes, device_auth_method="mac", **document_kwargs),
     )
     pdp_called = False
 
