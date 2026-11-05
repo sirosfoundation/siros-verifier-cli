@@ -267,3 +267,24 @@ def test_read_escapes_validation_diagnostics(wallet_engagement, monkeypatch, cap
     assert "\nforged" not in captured.err
     assert "bad\\x1b[31m\\nforged" in captured.err
     assert "given_name" not in captured.out
+
+
+def test_read_escapes_session_data_status(wallet_engagement, monkeypatch, capsys):
+    _device_priv, _de_bytes, mdoc_uri = wallet_engagement
+
+    async def fake_exchange(*args, **kwargs):
+        return ble.ExchangeResult(
+            session_data_bytes=cbor2.dumps({"status": "bad\x1b[2J"}),
+            negotiated_mtu=185,
+            chunk_size=182,
+            device_address="AA:BB:CC:DD:EE:FF",
+        )
+
+    monkeypatch.setattr(ble, "exchange", fake_exchange)
+    args = cli.build_parser().parse_args(["read", mdoc_uri])
+    rc = asyncio.run(cli.run_read(args))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.err
+    assert "bad\\x1b[2J" in captured.err

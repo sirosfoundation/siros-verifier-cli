@@ -236,7 +236,11 @@ async def run_read(args: argparse.Namespace) -> int:
     if "data" not in session_data:
         status = session_data.get("status")
         name = SESSION_STATUS_NAMES.get(status, f"unknown({status})")
-        print(f"error: mdoc returned SessionData with no data, status={status} ({name})", file=sys.stderr)
+        print(
+            f"error: mdoc returned SessionData with no data, "
+            f"status={_safe_diagnostic(status)} ({_safe_diagnostic(name)})",
+            file=sys.stderr,
+        )
         return 1
 
     plaintext = crypto.decrypt_device_message(sk_device, 1, session_data["data"])
@@ -334,7 +338,8 @@ async def run_fuzz(args: argparse.Namespace) -> int:
             status = session_data.get("status")
             name = SESSION_STATUS_NAMES.get(status, f"unknown({status})")
             print(
-                f"result: mdoc returned SessionData with no data, status={status} ({name}) - "
+                f"result: mdoc returned SessionData with no data, "
+                f"status={_safe_diagnostic(status)} ({_safe_diagnostic(name)}) - "
                 "this is the expected/correct response to this scenario",
                 file=sys.stderr,
             )
