@@ -396,9 +396,12 @@ def validate_device_response(
                 if any(value is None for value in validity.values()):
                     errors.append(f"{prefix}: validity_info")
                 else:
+                    signed = validity["signed"]
                     valid_from = validity["validFrom"]
                     valid_until = validity["validUntil"]
-                    assert valid_from is not None and valid_until is not None
+                    assert signed is not None and valid_from is not None and valid_until is not None
+                    if current_time < signed:
+                        errors.append(f"{prefix}: signed_in_future")
                     if current_time < valid_from:
                         errors.append(f"{prefix}: not_yet_valid")
                     if current_time >= valid_until:
