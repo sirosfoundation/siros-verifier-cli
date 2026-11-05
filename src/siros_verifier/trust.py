@@ -14,7 +14,6 @@ import unicodedata
 from urllib.parse import urlsplit
 
 import aiohttp
-from asn1crypto import core as asn1_core
 from asn1crypto import x509 as asn1_x509
 
 from siros_verifier import mdoc
@@ -47,12 +46,50 @@ def _hash_issuer_id(leaf_der: bytes) -> str:
     return f"x509_hash:{digest}"
 
 
+def _der_item_end(data: bytes, offset: int, limit: int) -> int:
+    """Return one DER item's end, rejecting high tags and indefinite/non-minimal lengths."""
+    if offset + 2 > limit:
+        raise ValueError("truncated DER header")
+    tag = data[offset]
+    if tag == 0 or tag & 0x1F == 0x1F:
+        raise ValueError("unsupported DER tag")
+    offset += 1
+    first_length = data[offset]
+    offset += 1
+    if first_length & 0x80:
+        length_size = first_length & 0x7F
+        if length_size == 0 or offset + length_size > limit:
+            raise ValueError("invalid DER length")
+        length_bytes = data[offset : offset + length_size]
+        if length_bytes[0] == 0:
+            raise ValueError("non-minimal DER length")
+        content_length = int.from_bytes(length_bytes, "big")
+        if content_length < 128:
+            raise ValueError("non-minimal DER long-form length")
+        offset += length_size
+    else:
+        content_length = first_length
+    content_end = offset + content_length
+    if content_end > limit:
+        raise ValueError("truncated DER contents")
+    if tag & 0x20:
+        child = offset
+        while child < content_end:
+            child = _der_item_end(data, child, content_end)
+        if child != content_end:
+            raise ValueError("invalid constructed DER contents")
+    return content_end
+
+
+def _validate_der_encoding(data: bytes) -> None:
+    if not data or _der_item_end(data, 0, len(data)) != len(data):
+        raise ValueError("invalid DER value")
+
+
 def mdoc_issuer_id(leaf_der: bytes) -> str:
     """Match verifier-core's ordered, SAN-only DER traversal and leaf-hash fallback."""
     try:
-        structural = asn1_core.Sequence.load(leaf_der, strict=True)
-        if structural.dump(force=True) != leaf_der:
-            return _hash_issuer_id(leaf_der)
+        _validate_der_encoding(leaf_der)
         certificate = asn1_x509.Certificate.load(leaf_der, strict=True)
         extensions = certificate["tbs_certificate"]["extensions"]
     except (TypeError, ValueError):
@@ -63,6 +100,7 @@ def mdoc_issuer_id(leaf_der: bytes) -> str:
             continue
         try:
             san_der = extension["extn_value"].contents
+            _validate_der_encoding(san_der)
             san = asn1_x509.GeneralNames.load(san_der, strict=True)
             if san.dump(force=True) != san_der:
                 return _hash_issuer_id(leaf_der)
@@ -140,14 +178,14 @@ async def evaluate_request(payload: dict, pdp_url: str, bearer_token: str | None
     _validate_pdp_url(pdp_url)
     _validate_bearer_token(bearer_token)
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "Accept-Encoding": "identity"}
     if bearer_token:
         headers["Authorization"] = f"Bearer {bearer_token}"
     timeout = aiohttp.ClientTimeout(total=PDP_TIMEOUT_SECONDS)
 
     try:
         async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
+            aiohttp.ClientSession(timeout=timeout, auto_decompress=False) as session,
             session.post(pdp_url, data=body, headers=headers, allow_redirects=False) as response,
         ):
             if not 200 <= response.status < 300:

@@ -324,10 +324,14 @@ def _aware_datetime(value: object) -> datetime | None:
     return value
 
 
+def _valid_error_code(code: object) -> bool:
+    return type(code) is int and -(1 << 64) <= code < (1 << 64)
+
+
 def _valid_document_errors(errors: object) -> bool:
     return isinstance(errors, list) and all(
         isinstance(item, dict)
-        and all(isinstance(doc_type, str) and type(code) is int for doc_type, code in item.items())
+        and all(isinstance(doc_type, str) and _valid_error_code(code) for doc_type, code in item.items())
         for item in errors
     )
 
@@ -336,7 +340,7 @@ def _valid_element_errors(errors: object) -> bool:
     return isinstance(errors, dict) and all(
         isinstance(namespace, str)
         and isinstance(items, dict)
-        and all(isinstance(identifier, str) and type(code) is int for identifier, code in items.items())
+        and all(isinstance(identifier, str) and _valid_error_code(code) for identifier, code in items.items())
         for namespace, items in errors.items()
     )
 

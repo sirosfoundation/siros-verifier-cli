@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime
+import gzip
 import hashlib
 import json
 import threading
@@ -128,6 +129,13 @@ def test_issuer_id_returns_first_usable_san_before_duplicate():
 def test_issuer_id_rejects_non_der_san(rewrite):
     der = make_certificate([x509.UniformResourceIdentifier("https://issuer.example")])
     malformed = rewrite_san(der, rewrite)
+    assert trust.mdoc_issuer_id(malformed) == expected_hash_identity(malformed)
+
+
+def test_issuer_id_rejects_non_minimal_certificate_length():
+    der = make_certificate([x509.UniformResourceIdentifier("https://issuer.example")])
+    assert der[:2] == b"\x30\x82"
+    malformed = b"\x30\x83\x00" + der[2:]
     assert trust.mdoc_issuer_id(malformed) == expected_hash_identity(malformed)
 
 
@@ -274,6 +282,16 @@ def test_evaluation_does_not_follow_redirects(pdp_server):
     with pytest.raises(trust.TrustUnavailable, match="HTTP 302"):
         evaluate({}, url, None)
     assert len(server.requests) == 1
+
+
+def test_evaluation_never_decompresses_response(pdp_server):
+    server, url = pdp_server
+    compressed = gzip.compress(b" " * (2 * trust.MAX_PDP_RESPONSE_BYTES))
+    queue_response(server, compressed, headers={"Content-Encoding": "gzip"})
+
+    with pytest.raises(trust.TrustUnavailable, match="malformed JSON"):
+        evaluate({}, url, None)
+    assert server.requests[0]["headers"]["Accept-Encoding"] == "identity"
 
 
 def test_evaluation_rejects_oversized_response(pdp_server):
