@@ -305,12 +305,14 @@ def verify_device_auth(
 
 def parse_device_response(plaintext: bytes) -> DeviceResponseResult:
     device_response = cbor2.loads(plaintext)
-    status = device_response.get("status")
+    raw_status = device_response.get("status")
+    status = raw_status if type(raw_status) is int else None
+    status_name = STATUS_NAMES.get(status, f"unknown({status})") if status is not None else f"unknown({raw_status})"
     documents = [_parse_document(doc) for doc in device_response.get("documents", [])]
     return DeviceResponseResult(
         version=device_response.get("version"),
         status=status,
-        status_name=STATUS_NAMES.get(status, f"unknown({status})"),
+        status_name=status_name,
         documents=documents,
         document_errors=device_response.get("documentErrors", []),
     )
